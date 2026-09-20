@@ -1,6 +1,7 @@
 /**
- * Telegram Bridge Client
- * Handles communication with Telegram Bot API.
+ * Telegram Bridge Client — v0.2.0
+ * Pure API client. No polling loop here (MV3 service workers die).
+ * Polling is driven by chrome.alarms in background.js.
  */
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org/bot';
@@ -11,8 +12,6 @@ const TelegramBridge = {
   deviceName: '',
   chatId: '',
   lastUpdateId: 0,
-  polling: false,
-  pollTimeout: 30,
 
   async init() {
     const stored = await chrome.storage.local.get([
@@ -20,9 +19,10 @@ const TelegramBridge = {
     ]);
 
     this.botToken = stored.botToken || '';
+    // NOTE: do NOT regenerate deviceId here — only generate if truly absent
     this.deviceId = stored.deviceId || this.generateDeviceId();
     this.deviceName = stored.deviceName || '';
-    this.chatId = stored.chatId || '';
+    this.chatId = stored.chatId ? String(stored.chatId) : '';
     this.lastUpdateId = stored.lastUpdateId || 0;
 
     if (!stored.deviceId) {
@@ -50,7 +50,9 @@ const TelegramBridge = {
 
   async getProfileInfo() {
     try {
-      return await chrome.identity.getProfileUserInfo();
+      // identity.email requires the "identity.email" permission; fall back gracefully
+      const info = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
+      return { email: info.email || '', id: info.id || '' };
     } catch (e) {
       return { email: '', id: '' };
     }
@@ -59,112 +61,58 @@ const TelegramBridge = {
   async apiCall(method, params = {}) {
     if (!this.botToken) throw new Error('Bot token not configured');
     const url = `${TELEGRAM_API_BASE}${this.botToken}/${method}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params)
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     const data = await response.json();
     if (!data.ok) throw new Error(data.description || 'Telegram API error');
     return data.result;
   },
 
+  /**
+   * Short-poll getUpdates. timeout=0 => returns immediately, safe for MV3.
+   */
   async getUpdates(offset) {
     return this.apiCall('getUpdates', {
-      offset: offset || (this.lastUpdateId + 1),
-      timeout: this.pollTimeout,
+      offset: (offset !== undefined) ? offset : (this.lastUpdateId + 1),
+      timeout: 0,
       allowed_updates: ['message']
     });
   },
 
   async sendMessage(text, parseMode) {
-    if (!this.chatId) {
-      const updates = await this.getUpdates(0);
-      if (updates.length > 0) {
-        this.chatId = String(updates[updates.length - 1].message.chat.id);
-        await chrome.storage.local.set({ chatId: this.chatId });
-      }
-    }
+    if (!this.chatId) throw new Error('Chat not linked. Send a message to the bot first.');
     return this.apiCall('sendMessage', {
       chat_id: this.chatId,
       text,
-      parse_mode: parseMode || 'HTML'
+      parse_mode: parseMode || 'HTML',
+      disable_web_page_preview: true
     });
   },
 
-  async startPolling() {
-    if (this.polling) return;
-    if (!this.isConfigured()) return;
-
-    this.polling = true;
-    console.log(`[Bridge] Polling started: ${this.deviceName} (${this.deviceId})`);
-
-    const profile = await this.getProfileInfo();
-    await this.sendMessage(
-      `✅ ${this.deviceName} is online\n` +
-      `Device ID: ${this.deviceId}\n` +
-      `Profile: ${profile.email || 'not logged in'}`
-    );
-
-    while (this.polling) {
-      try {
-        const updates = await this.getUpdates();
-        for (const update of updates) {
-          this.lastUpdateId = update.update_id;
-          await chrome.storage.local.set({ lastUpdateId: this.lastUpdateId });
-
-          if (update.message && update.message.text) {
-            await this.handleMessage(update.message);
-          }
-        }
-      } catch (error) {
-        console.error('[Bridge] Polling error:', error);
-        await this.sleep(5000);
+  /**
+   * Link chatId from bot updates (used by options page Test Connection).
+   */
+  async linkChatFromUpdates() {
+    const updates = await this.getUpdates(0);
+    if (updates.length > 0) {
+      const last = updates[updates.length - 1];
+      if (last.message && last.message.chat) {
+        this.chatId = String(last.message.chat.id);
+        await chrome.storage.local.set({ chatId: this.chatId });
+        return this.chatId;
       }
     }
-  },
-
-  stopPolling() {
-    this.polling = false;
-    console.log('[Bridge] Polling stopped');
-  },
-
-  async handleMessage(message) {
-    const text = (message.text || '').trim();
-    const chatId = String(message.chat.id);
-
-    if (!this.chatId) {
-      this.chatId = chatId;
-      await chrome.storage.local.set({ chatId: this.chatId });
-    }
-
-    const targetMatch = text.match(/^@(\S+)\s+(.*)/);
-    let command;
-
-    if (targetMatch) {
-      const targetDevice = targetMatch[1];
-      command = targetMatch[2];
-      if (targetDevice.toLowerCase() !== this.deviceName.toLowerCase()) {
-        return;
-      }
-    } else {
-      command = text;
-    }
-
-    await this.sendMessage(`✅ Received: ${command}`);
-
-    // Forward to content script
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs[0]) {
-        await chrome.tabs.sendMessage(tabs[0].id, { type: 'execute', command });
-      }
-    } catch (e) {
-      console.log('[Bridge] No content script on active tab');
-    }
-  },
-
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return null;
   }
 };

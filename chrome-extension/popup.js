@@ -1,175 +1,181 @@
 /**
- * Popup Logic — v0.1.1
- * Reads config directly from chrome.storage.local (not relying on background init).
+ * Popup Logic — v0.2.0
+ * Reads config straight from storage; gets polling state from background.
  */
 
-const CURRENT_VERSION = '0.1.0';
-
 document.addEventListener('DOMContentLoaded', async () => {
-  document.getElementById('version').textContent = `v${CURRENT_VERSION}`;
-
-  await updateStatus();
-
   document.getElementById('btnToggle').addEventListener('click', togglePolling);
-  document.getElementById('btnSettings').addEventListener('click', openSettings);
+  document.getElementById('btnSettings').addEventListener('click', () => chrome.runtime.openOptionsPage());
   document.getElementById('btnUpdate').addEventListener('click', doUpdate);
-  document.getElementById('version').addEventListener('click', checkForUpdate);
+  document.getElementById('btnLogs').addEventListener('click', toggleLogs);
+  document.getElementById('version').addEventListener('click', () => refresh(true));
+
+  await refresh();
+  // live-ish updates while popup is open
+  setInterval(refresh, 2000);
 });
 
-async function updateStatus() {
+let currentState = null;
+let logsOpen = false;
+let busy = false;
+
+async function refresh(checkUpdate = false) {
+  if (busy) return;
+
+  let state;
   try {
-    // Read directly from storage — don't depend on background being initialized
-    const stored = await chrome.storage.local.get([
-      'botToken', 'deviceId', 'deviceName', 'chatId', 'updateAvailable', 'updateVersion'
-    ]);
-
-    const configured = !!(stored.botToken && stored.deviceName);
-    const deviceName = stored.deviceName || '';
-    const deviceId = stored.deviceId || '';
-    const chatId = stored.chatId || '';
-
-    // Update UI
-    document.getElementById('device').textContent = deviceName || '—';
-    document.getElementById('deviceId').textContent = deviceId || '';
-    document.getElementById('profile').textContent = chatId ? 'Linked' : 'Not linked';
-
-    // Check polling status from background
-    let polling = false;
-    try {
-      const response = await chrome.runtime.sendMessage({ type: 'status-check' });
-      if (response && response.polling !== undefined) {
-        polling = response.polling;
-      }
-    } catch (e) {
-      // Background might not be ready — that's ok
-    }
-
-    document.getElementById('polling').textContent = polling ? 'Active' : 'Idle';
-
-    // Set status display
-    if (!configured) {
-      setStatus('red', 'Not configured');
-      const btn = document.getElementById('btnToggle');
-      btn.textContent = 'Open Settings';
-    } else if (polling) {
-      setStatus('green', 'Connected');
-      document.getElementById('btnToggle').textContent = 'Stop';
-    } else {
-      setStatus('yellow', 'Ready — click Start');
-      document.getElementById('btnToggle').textContent = 'Start';
-    }
-
-    // Show update button if available
-    if (stored.updateAvailable && stored.updateVersion) {
-      const updateBtn = document.getElementById('btnUpdate');
-      updateBtn.classList.remove('hidden');
-      updateBtn.textContent = ` Update Available — v${stored.updateVersion}`;
-    }
-
-    // Get profile email
-    try {
-      const info = await chrome.identity.getProfileUserInfo();
-      if (info.email) {
-        document.getElementById('profile').textContent = info.email;
-      }
-    } catch (e) {
-      // identity might not be available
-    }
-
-  } catch (error) {
-    setStatus('red', 'Error: ' + error.message);
+    state = await send({ type: 'status-check' });
+  } catch (e) {
+    state = null;
   }
+
+  if (!state) {
+    setStatus('red', 'Service worker nggak merespons');
+    return;
+  }
+  currentState = state;
+
+  document.getElementById('version').textContent = 'v' + state.version;
+  document.getElementById('device').textContent = state.deviceName || '—';
+  document.getElementById('deviceId').textContent = state.deviceId || '';
+
+  // profile / chat link
+  const profileEl = document.getElementById('profile');
+  try {
+    const info = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
+    if (info.email) {
+      profileEl.textContent = info.email;
+    } else {
+      profileEl.textContent = state.chatId ? 'Chat linked' : 'Not linked';
+    }
+  } catch (e) {
+    profileEl.textContent = state.chatId ? 'Chat linked' : 'Not linked';
+  }
+
+  document.getElementById('polling').textContent = state.polling ? 'Active' : 'Idle';
+
+  const btn = document.getElementById('btnToggle');
+  if (!state.configured) {
+    setStatus('red', 'Not configured');
+    btn.textContent = '⚙️ Open Settings';
+    btn.dataset.mode = 'settings';
+  } else if (!state.chatId) {
+    setStatus('yellow', 'Chat belum ke-link');
+    btn.textContent = 'Start';
+    btn.dataset.mode = 'start';
+  } else if (state.polling) {
+    const ago = state.lastPollOk ? Math.round((Date.now() - state.lastPollOk) / 1000) : null;
+    if (state.lastPollError) {
+      setStatus('yellow', 'Polling error — retrying');
+    } else {
+      setStatus('green', ago === null || ago < 90 ? 'Connected' : `Connected (${ago}s lalu)`);
+    }
+    btn.textContent = 'Stop';
+    btn.dataset.mode = 'stop';
+  } else {
+    setStatus('yellow', 'Ready — click Start');
+    btn.textContent = 'Start';
+    btn.dataset.mode = 'start';
+  }
+
+  // error detail
+  const errEl = document.getElementById('errBox');
+  if (state.lastPollError) {
+    errEl.classList.remove('hidden');
+    errEl.textContent = '⚠ ' + state.lastPollError;
+  } else {
+    errEl.classList.add('hidden');
+  }
+
+  // update button
+  const upBtn = document.getElementById('btnUpdate');
+  if (state.updateAvailable && state.updateVersion) {
+    upBtn.classList.remove('hidden');
+    upBtn.textContent = `⬆ Update v${state.updateVersion} tersedia`;
+  } else {
+    upBtn.classList.add('hidden');
+  }
+
+  if (logsOpen) await renderLogs();
+
+  if (checkUpdate) {
+    const verEl = document.getElementById('version');
+    const prev = verEl.textContent;
+    verEl.textContent = 'cek…';
+    try {
+      await send({ type: 'check-update' });
+    } catch (e) { /* ignore */ }
+    verEl.textContent = prev;
+  }
+}
+
+function send(msg) {
+  return chrome.runtime.sendMessage(msg);
 }
 
 async function togglePolling() {
   const btn = document.getElementById('btnToggle');
-  const currentText = btn.textContent;
+  const mode = btn.dataset.mode;
 
-  if (currentText === 'Open Settings') {
-    openSettings();
+  if (mode === 'settings') {
+    chrome.runtime.openOptionsPage();
     return;
   }
 
-  if (currentText === 'Start') {
-    btn.textContent = 'Starting...';
-    btn.disabled = true;
-    try {
-      await chrome.runtime.sendMessage({ type: 'start-polling' });
-    } catch (e) {
-      // Background might need re-init
-      console.log('[Popup] Start failed, trying re-init');
-    }
-    btn.disabled = false;
-  } else if (currentText === 'Stop') {
-    btn.textContent = 'Stopping...';
-    btn.disabled = true;
-    try {
-      await chrome.runtime.sendMessage({ type: 'stop-polling' });
-    } catch (e) {
-      // ignore
-    }
-    btn.disabled = false;
-  }
+  busy = true;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = mode === 'start' ? 'Starting…' : 'Stopping…';
 
-  setTimeout(updateStatus, 1000);
-}
-
-function openSettings() {
-  chrome.runtime.openOptionsPage();
-}
-
-// ─── Update Check ─────────────────────────────────────────────────
-
-async function checkForUpdate() {
-  const REPO_API = 'https://api.github.com/repos/yongprener/tiktok-automation-bridge/releases/latest';
   try {
-    const response = await fetch(REPO_API);
-    if (!response.ok) return;
+    const res = mode === 'start'
+      ? await send({ type: 'start-polling' })
+      : await send({ type: 'stop-polling' });
 
-    const data = await response.json();
-    const latestVersion = (data.tag_name || '').replace(/^v/, '');
-
-    if (latestVersion && isNewerVersion(latestVersion, CURRENT_VERSION)) {
-      const updateBtn = document.getElementById('btnUpdate');
-      updateBtn.classList.remove('hidden');
-      updateBtn.textContent = ` Update Available — v${latestVersion}`;
-
-      await chrome.storage.local.set({
-        updateAvailable: true,
-        updateVersion: latestVersion
-      });
-    } else {
-      const versionEl = document.getElementById('version');
-      versionEl.textContent = `v${CURRENT_VERSION} ✓`;
+    if (res && res.success === false) {
+      setStatus('red', res.error || 'Gagal');
+      showError(res.error || 'Gagal memulai polling');
     }
   } catch (e) {
-    console.log('[Popup] Update check failed:', e.message);
+    // service worker went away — restart it and retry once
+    try {
+      const res2 = mode === 'start'
+        ? await send({ type: 'start-polling' })
+        : await send({ type: 'stop-polling' });
+      if (res2 && res2.success === false) showError(res2.error);
+    } catch (e2) {
+      showError('Chrome memutus koneksi ke service worker: ' + e2.message);
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+    busy = false;
+    await refresh();
   }
 }
 
-function isNewerVersion(latest, current) {
-  if (!latest) return false;
-  const l = latest.split('.').map(Number);
-  const c = current.split('.').map(Number);
-  for (let i = 0; i < Math.max(l.length, c.length); i++) {
-    if ((l[i] || 0) > (c[i] || 0)) return true;
-    if ((l[i] || 0) < (c[i] || 0)) return false;
-  }
-  return false;
+function showError(msg) {
+  const errEl = document.getElementById('errBox');
+  errEl.classList.remove('hidden');
+  errEl.textContent = '⚠ ' + msg;
+}
+
+async function toggleLogs() {
+  logsOpen = !logsOpen;
+  document.getElementById('logs').classList.toggle('hidden', !logsOpen);
+  if (logsOpen) await renderLogs();
+}
+
+async function renderLogs() {
+  const el = document.getElementById('logs');
+  const { logs } = await chrome.storage.local.get(['logs']);
+  el.textContent = (logs || []).slice(-30).join('\n') || '(kosong)';
 }
 
 async function doUpdate() {
   const btn = document.getElementById('btnUpdate');
-  btn.textContent = ' Run update.sh or update.bat to update';
-
-  // Notify user
-  chrome.notifications?.create('update-instructions', {
-    type: 'basic',
-    iconUrl: 'icons/icon128.png',
-    title: 'How to Update',
-    message: 'Run update.sh (Mac/Linux) or update.bat (Windows) in the project folder, then reload the extension.',
-    priority: 2
-  }).catch(() => {});
+  btn.textContent = '⬆ Jalankan update.bat, lalu reload extension';
+  setTimeout(refresh, 2500);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────

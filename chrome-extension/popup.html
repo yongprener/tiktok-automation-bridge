@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
   <meta charset="UTF-8">
   <style>
@@ -11,82 +11,62 @@
       background: #1a1a2e;
       color: #e0e0e0;
     }
-    .header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 14px;
-    }
+    .header { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
     .header h2 { font-size: 15px; margin: 0; flex: 1; }
     .version {
-      font-size: 11px;
-      color: #666;
-      background: #16213e;
-      padding: 2px 8px;
-      border-radius: 10px;
-      cursor: pointer;
+      font-size: 11px; color: #888; background: #16213e;
+      padding: 2px 8px; border-radius: 10px; cursor: pointer;
     }
-    .status-box {
-      background: #16213e;
-      border-radius: 8px;
-      padding: 12px;
-      margin-bottom: 12px;
-    }
+    .version:hover { color: #4caf50; }
+    .status-box { background: #16213e; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
     .status-row {
-      display: flex;
-      justify-content: space-between;
-      padding: 4px 0;
-      font-size: 12px;
+      display: flex; justify-content: space-between;
+      padding: 4px 0; font-size: 12px; gap: 8px;
     }
-    .status-label { color: #888; }
-    .status-value { color: #e0e0e0; font-weight: 500; }
-    .dot {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      margin-right: 6px;
-      vertical-align: middle;
-    }
+    .status-label { color: #888; white-space: nowrap; }
+    .status-value { color: #e0e0e0; font-weight: 500; text-align: right; word-break: break-all; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
     .dot.green { background: #4caf50; }
     .dot.red { background: #f44336; }
     .dot.yellow { background: #ff9800; }
     .btn {
-      display: block;
-      width: 100%;
-      padding: 10px;
-      border: none;
-      border-radius: 6px;
-      font-size: 13px;
-      cursor: pointer;
-      margin-bottom: 6px;
-      transition: opacity 0.2s;
+      display: block; width: 100%; padding: 10px; border: none;
+      border-radius: 6px; font-size: 13px; cursor: pointer;
+      margin-bottom: 6px; transition: opacity 0.2s;
     }
     .btn:active { opacity: 0.7; }
+    .btn:disabled { opacity: 0.5; cursor: default; }
     .btn-primary { background: #0f3460; color: white; }
     .btn-secondary { background: #16213e; color: #e0e0e0; border: 1px solid #333; }
     .btn-update {
-      background: transparent;
-      color: #4caf50;
-      border: 1px solid #4caf50;
-      font-size: 12px;
+      background: transparent; color: #4caf50;
+      border: 1px solid #4caf50; font-size: 12px;
     }
-    .btn-update.hidden { display: none; }
-    .muted { color: #555; font-size: 10px; text-align: center; margin-top: 8px; }
+    .err {
+      background: #3a1a1a; border-left: 3px solid #f44336;
+      color: #ffb3b3; font-size: 11px; padding: 8px 10px;
+      border-radius: 4px; margin-bottom: 8px; word-break: break-word;
+    }
+    .logs {
+      background: #0d0d1a; color: #8f8; font-family: monospace;
+      font-size: 10px; padding: 8px; border-radius: 4px;
+      max-height: 160px; overflow: auto; white-space: pre-wrap;
+      margin-bottom: 8px;
+    }
+    .muted { color: #555; font-size: 10px; text-align: center; margin-top: 8px; word-break: break-all; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
   <div class="header">
-    <h2> TikTok Bridge</h2>
-    <span class="version" id="version" title="Click to check for updates">v0.1.0</span>
+    <h2>🌉 TikTok Bridge</h2>
+    <span class="version" id="version" title="Klik untuk cek update">v—</span>
   </div>
-  
+
   <div class="status-box">
     <div class="status-row">
       <span class="status-label">Status</span>
-      <span class="status-value" id="status">
-        <span class="dot red"></span>Checking...
-      </span>
+      <span class="status-value" id="status"><span class="dot red"></span>Checking…</span>
     </div>
     <div class="status-row">
       <span class="status-label">Device</span>
@@ -102,10 +82,15 @@
     </div>
   </div>
 
-  <button class="btn btn-primary" id="btnToggle">Start</button>
+  <div class="err hidden" id="errBox"></div>
+
+  <button class="btn btn-primary" id="btnToggle" data-mode="start">Start</button>
   <button class="btn btn-secondary" id="btnSettings">⚙️ Settings</button>
-  <button class="btn btn-update hidden" id="btnUpdate"> Update Available — Click to Update</button>
-  
+  <button class="btn btn-secondary" id="btnLogs">📋 Log</button>
+  <button class="btn btn-update hidden" id="btnUpdate">⬆ Update tersedia</button>
+
+  <div class="logs hidden" id="logs"></div>
+
   <p class="muted" id="deviceId"></p>
 
   <script src="popup.js"></script>

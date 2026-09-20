@@ -1,271 +1,295 @@
 /**
- * Background Service Worker
- * Main orchestrator: init bridge, poll commands, auto-update check, dispatch.
+ * Background Service Worker — v0.2.0
+ *
+ * MV3-safe design: NO long-running loops (service worker is killed after ~30s idle).
+ * Polling is driven by chrome.alarms firing every 30s, each tick doing ONE short poll.
  */
 
 self.importScripts('lib/telegram-bridge.js');
 
-const CURRENT_VERSION = '0.1.0';
+const CURRENT_VERSION = '0.2.0';
 const REPO_API = 'https://api.github.com/repos/yongprener/tiktok-automation-bridge/releases/latest';
+const POLL_ALARM = 'bridge-poll';
+const UPDATE_ALARM = 'bridge-update-check';
 
 let activeTabId = null;
 
-// ─── Initialize on load (service worker start) ────────────────────
+// ─── Lightweight log ring buffer (shown in popup) ─────────────────
 
-// Run immediately — service worker wakes up on messages, not just onInstalled
-initBackground();
+async function logEvent(msg) {
+  try {
+    const { logs } = await chrome.storage.local.get(['logs']);
+    const arr = Array.isArray(logs) ? logs : [];
+    arr.push(new Date().toLocaleTimeString('id-ID') + ' ' + msg);
+    while (arr.length > 60) arr.shift();
+    await chrome.storage.local.set({ logs: arr });
+  } catch (e) { /* ignore */ }
+}
 
-async function initBackground() {
+// ─── Init (runs every time the service worker wakes) ──────────────
+
+(async () => {
   try {
     await TelegramBridge.init();
-    console.log('[BG] Bridge initialized. Configured:', TelegramBridge.isConfigured());
-    
-    // Set up alarms
-    chrome.alarms.create('poll', { periodInMinutes: 0.5 });
-    chrome.alarms.create('update-check', { periodInMinutes: 30 });
+    console.log('[BG] Init OK. configured=%s polling=%s device=%s',
+      TelegramBridge.isConfigured(), await isPollingEnabled(), TelegramBridge.deviceName);
   } catch (e) {
     console.error('[BG] Init error:', e);
   }
+})();
+
+async function isPollingEnabled() {
+  const { pollingEnabled } = await chrome.storage.local.get(['pollingEnabled']);
+  return !!pollingEnabled;
+}
+
+async function setPollingEnabled(v) {
+  await chrome.storage.local.set({ pollingEnabled: !!v });
 }
 
 // ─── Lifecycle ────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(async (details) => {
-  console.log('[BG] Installed/updated:', details.reason);
+  console.log('[BG] onInstalled:', details.reason);
   await TelegramBridge.init();
-  
-  if (details.reason === 'install') {
-    chrome.runtime.openOptionsPage();
-  }
+  chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
+  chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 30 });
+  await setPollingEnabled(false);
+  if (details.reason === 'install') chrome.runtime.openOptionsPage();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  console.log('[BG] Browser started');
+  console.log('[BG] onStartup');
   await TelegramBridge.init();
+  chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
+  chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 30 });
 });
 
-// ─── Alarm Handler ────────────────────────────────────────────────
+// ─── Alarm-driven polling ─────────────────────────────────────────
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'poll') {
-    if (TelegramBridge.isConfigured() && !TelegramBridge.polling) {
-      console.log('[BG] Auto-starting polling from alarm...');
-      await TelegramBridge.startPolling();
-    }
-  } else if (alarm.name === 'update-check') {
+  if (alarm.name === POLL_ALARM) {
+    await pollTick();
+  } else if (alarm.name === UPDATE_ALARM) {
     await checkForUpdate();
   }
 });
 
-// ─── Auto-Update ──────────────────────────────────────────────────
+async function pollTick() {
+  await TelegramBridge.init();
+  if (!TelegramBridge.isConfigured()) return;
+  if (!(await isPollingEnabled())) return;
 
-async function checkForUpdate() {
   try {
-    const response = await fetch(REPO_API);
-    if (!response.ok) return;
-    const data = await response.json();
-    const latestVersion = (data.tag_name || '').replace(/^v/, '');
+    const updates = await TelegramBridge.getUpdates();
+    if (updates.length) {
+      await logEvent(`poll: ${updates.length} update`);
+    }
+    for (const update of updates) {
+      TelegramBridge.lastUpdateId = update.update_id;
+      await chrome.storage.local.set({ lastUpdateId: update.update_id });
 
-    if (latestVersion && isNewerVersion(latestVersion, CURRENT_VERSION)) {
-      chrome.notifications.create('update-available', {
-        type: 'basic',
-        iconUrl: 'icons/icon128.png',
-        title: 'Update Available',
-        message: `v${latestVersion} is ready. Run update.bat to update.`,
-        priority: 2
-      });
-      await chrome.storage.local.set({ updateAvailable: true, updateVersion: latestVersion });
+      if (update.message && update.message.text) {
+        await handleCommandMessage(update.message);
+      }
+    }
+    await chrome.storage.local.set({ lastPollOk: Date.now(), lastPollError: '' });
+  } catch (e) {
+    console.error('[BG] Poll error:', e.message);
+    await chrome.storage.local.set({ lastPollError: e.message });
+    await logEvent('poll error: ' + e.message);
+  }
+}
+
+// ─── Command handling ─────────────────────────────────────────────
+
+async function handleCommandMessage(message) {
+  const text = (message.text || '').trim();
+  const chatId = String(message.chat.id);
+
+  if (!TelegramBridge.chatId) {
+    TelegramBridge.chatId = chatId;
+    await chrome.storage.local.set({ chatId });
+  }
+
+  // Optional "@deviceName command" targeting
+  let command = text;
+  const targetMatch = text.match(/^@(\S+)\s+(.*)$/);
+  if (targetMatch) {
+    const targetDevice = targetMatch[1].toLowerCase();
+    const myName = (TelegramBridge.deviceName || '').toLowerCase();
+    if (targetDevice !== myName) return; // not for this device
+    command = targetMatch[2];
+  }
+
+  // Ack
+  try {
+    await TelegramBridge.sendMessage(`✅ <b>${escapeHtml(command)}</b>\n_diterima, diproses..._`);
+  } catch (e) {
+    console.warn('[BG] Ack failed:', e.message);
+  }
+
+  const result = await executeCommand(command);
+
+  try {
+    if (result.success) {
+      if (result.screenshot) {
+        await sendPhoto(result.screenshot, result.message || '📸 Screenshot');
+      } else {
+        const body = result.data
+          ? '\n<pre>' + escapeHtml(JSON.stringify(result.data, null, 2).slice(0, 3000)) + '</pre>'
+          : '';
+        await TelegramBridge.sendMessage(`✅ ${escapeHtml(result.message || 'Done')}${body}`);
+      }
+    } else {
+      await TelegramBridge.sendMessage(`❌ ${escapeHtml(result.error || 'Command failed')}`);
     }
   } catch (e) {
-    console.log('[BG] Update check failed:', e.message);
+    console.warn('[BG] Result send failed:', e.message);
   }
 }
 
-function isNewerVersion(latest, current) {
-  if (!latest) return false;
-  const l = latest.split('.').map(Number);
-  const c = current.split('.').map(Number);
-  for (let i = 0; i < Math.max(l.length, c.length); i++) {
-    if ((l[i] || 0) > (c[i] || 0)) return true;
-    if ((l[i] || 0) < (c[i] || 0)) return false;
-  }
-  return false;
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// ─── Message Router ───────────────────────────────────────────────
+async function sendPhoto(dataUrl, caption) {
+  const blob = await (await fetch(dataUrl)).blob();
+  const form = new FormData();
+  form.append('chat_id', TelegramBridge.chatId);
+  form.append('caption', caption);
+  form.append('photo', blob, 'screenshot.png');
+  const res = await fetch(`https://api.telegram.org/bot${TelegramBridge.botToken}/sendPhoto`, {
+    method: 'POST',
+    body: form
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.description);
+  return data.result;
+}
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'status-check') {
-    sendResponse({
-      configured: TelegramBridge.isConfigured(),
-      deviceName: TelegramBridge.deviceName,
-      deviceId: TelegramBridge.deviceId,
-      polling: TelegramBridge.polling,
-      version: CURRENT_VERSION
-    });
-    return false;
-  }
+// ─── Command executor ─────────────────────────────────────────────
 
-  if (message.type === 'config-update') {
-    TelegramBridge.saveConfig(message.config).then(async () => {
-      await TelegramBridge.init();
-      sendResponse({ success: true });
-    });
-    return true;
-  }
-
-  if (message.type === 'start-polling') {
-    // Re-init in case config changed
-    TelegramBridge.init().then(() => {
-      return TelegramBridge.startPolling();
-    }).then(() => {
-      sendResponse({ success: true });
-    }).catch((e) => {
-      sendResponse({ success: false, error: e.message });
-    });
-    return true;
-  }
-
-  if (message.type === 'stop-polling') {
-    TelegramBridge.stopPolling();
-    sendResponse({ success: true });
-    return false;
-  }
-
-  if (message.type === 'check-update') {
-    checkForUpdate().then(() => {
-      chrome.storage.local.get(['updateAvailable', 'updateVersion']).then((res) => {
-        sendResponse(res);
-      });
-    });
-    return true;
-  }
-
-  if (message.type === 'bridge-command') {
-    handleCommand(message.command, sender, sendResponse);
-    return true;
-  }
-
-  return false;
-});
-
-// ─── Command Handler ──────────────────────────────────────────────
-
-async function handleCommand(command, sender, sendResponse) {
-  console.log('[BG] Command:', command);
-  const parts = (command || '').toLowerCase().split(/\s+/);
-  const action = parts[0];
+async function executeCommand(command) {
+  const parts = (command || '').trim().split(/\s+/);
+  const action = (parts[0] || '').toLowerCase();
+  const rest = parts.slice(1).join(' ');
 
   try {
     switch (action) {
       case 'navigate':
-      case 'buka': {
-        const url = parts.slice(1).join(' ');
-        await navigateToUrl(url);
-        sendResponse({ success: true, message: `Navigated to ${url}` });
-        break;
+      case 'buka':
+      case 'open': {
+        if (!rest) return { success: false, error: 'Usage: navigate <url>' };
+        const tab = await navigateToUrl(rest);
+        return { success: true, message: `Buka ${tab.url || rest}` };
       }
-      case 'screenshot': {
+      case 'screenshot':
+      case 'ss': {
         const dataUrl = await captureScreenshot();
-        sendResponse({ success: true, screenshot: dataUrl });
-        break;
+        return { success: true, screenshot: dataUrl, message: '📸 Screenshot' };
       }
-      case 'scrape': {
-        const selector = parts.slice(1).join(' ');
-        const result = await scrapeContent(selector);
-        sendResponse({ success: true, data: result });
-        break;
+      case 'scrape':
+      case 'ambil': {
+        if (!rest) return { success: false, error: 'Usage: scrape <css-selector>' };
+        const data = await scrapeContent(rest);
+        return { success: true, message: `Ketemu ${data.length} elemen`, data };
       }
-      case 'click': {
-        const selector = parts.slice(1).join(' ');
-        await clickElement(selector);
-        sendResponse({ success: true });
-        break;
+      case 'text':
+      case 'teks': {
+        const data = await pageText();
+        return { success: true, message: 'Teks halaman', data };
+      }
+      case 'click':
+      case 'klik': {
+        if (!rest) return { success: false, error: 'Usage: click <css-selector>' };
+        const ok = await clickElement(rest);
+        return ok
+          ? { success: true, message: `Klik ${rest}` }
+          : { success: false, error: `Elemen tidak ketemu: ${rest}` };
       }
       case 'fill': {
-        const match = command.match(/fill\s+(\S+)\s*=\s*(.+)/i);
-        if (match) {
-          await fillInput(match[1], match[2]);
-          sendResponse({ success: true });
-        } else {
-          sendResponse({ success: false, error: 'Usage: fill selector=value' });
-        }
-        break;
+        const m = command.match(/^fill\s+(\S+)\s*=\s*([\s\S]+)$/i);
+        if (!m) return { success: false, error: 'Usage: fill <selector>=<value>' };
+        const ok = await fillInput(m[1], m[2]);
+        return ok
+          ? { success: true, message: `Isi ${m[1]}` }
+          : { success: false, error: `Elemen tidak ketemu: ${m[1]}` };
+      }
+      case 'tabs':
+      case 'list': {
+        const tabs = await chrome.tabs.query({});
+        return {
+          success: true,
+          message: `${tabs.length} tab terbuka`,
+          data: tabs.map(t => ({ id: t.id, title: t.title, url: t.url }))
+        };
       }
       case 'status': {
-        sendResponse({
+        return {
           success: true,
-          status: {
+          message: 'Status device',
+          data: {
             deviceName: TelegramBridge.deviceName,
             deviceId: TelegramBridge.deviceId,
-            polling: TelegramBridge.polling,
             version: CURRENT_VERSION,
-            activeTab: activeTabId
+            chatId: TelegramBridge.chatId,
+            lastUpdateId: TelegramBridge.lastUpdateId
           }
-        });
-        break;
+        };
       }
-      default: {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs[0]) {
-          activeTabId = tabs[0].id;
-          try {
-            const response = await chrome.tabs.sendMessage(activeTabId, {
-              type: 'execute',
-              command
-            });
-            sendResponse(response || { success: false, error: 'No response from content script' });
-          } catch (e) {
-            sendResponse({ success: false, error: 'Cannot reach content script: ' + e.message });
-          }
-        } else {
-          sendResponse({ success: false, error: 'No active tab' });
-        }
+      case 'help':
+      case 'bantuan': {
+        return {
+          success: true,
+          message: 'Perintah',
+          data: [
+            'navigate <url>', 'screenshot', 'scrape <selector>',
+            'text', 'click <selector>', 'fill <selector>=<value>',
+            'tabs', 'status', 'help'
+          ]
+        };
       }
+      default:
+        return { success: false, error: `Perintah nggak dikenal: ${action}. Kirim "help" buat list.` };
     }
-  } catch (error) {
-    console.error('[BG] Command error:', error);
-    sendResponse({ success: false, error: error.message });
+  } catch (e) {
+    return { success: false, error: e.message };
   }
 }
 
-// ─── Tab Actions ──────────────────────────────────────────────────
+// ─── Tab helpers ──────────────────────────────────────────────────
+
+async function getActiveTab() {
+  let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tabs[0]) tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tabs[0]) throw new Error('Nggak ada tab aktif. Buka dulu tab-nya.');
+  return tabs[0];
+}
 
 async function navigateToUrl(url) {
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    url = 'https://' + url;
-  }
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
   const tab = await chrome.tabs.create({ url, active: true });
   activeTabId = tab.id;
-  return new Promise((resolve) => {
-    chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
-      if (tabId === tab.id && info.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve(tab);
-      }
-    });
-  });
+  return tab;
 }
 
 async function captureScreenshot() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tabs[0]) throw new Error('No active tab');
-  return chrome.tabs.captureVisibleTab(tabs[0].windowId, { format: 'png' });
+  const tab = await getActiveTab();
+  return chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
 }
 
 async function scrapeContent(selector) {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tabs[0]) throw new Error('No active tab');
+  const tab = await getActiveTab();
   const results = await chrome.scripting.executeScript({
-    target: { tabId: tabs[0].id },
+    target: { tabId: tab.id },
     func: (sel) => {
-      const elements = document.querySelectorAll(sel);
-      return Array.from(elements).map(el => ({
+      const els = document.querySelectorAll(sel);
+      return Array.from(els).slice(0, 200).map(el => ({
         tag: el.tagName,
-        text: el.textContent.trim().substring(0, 500),
+        text: (el.textContent || '').trim().slice(0, 300),
         href: el.href || '',
-        src: el.src || '',
-        html: el.outerHTML.substring(0, 1000)
+        src: el.src || ''
       }));
     },
     args: [selector]
@@ -273,29 +297,184 @@ async function scrapeContent(selector) {
   return results[0]?.result || [];
 }
 
+async function pageText() {
+  const tab = await getActiveTab();
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: () => (document.body ? document.body.innerText.slice(0, 5000) : '')
+  });
+  return results[0]?.result || '';
+}
+
 async function clickElement(selector) {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tabs[0]) throw new Error('No active tab');
-  await chrome.scripting.executeScript({
-    target: { tabId: tabs[0].id },
-    func: (sel) => { const el = document.querySelector(sel); if (el) el.click(); return !!el; },
+  const tab = await getActiveTab();
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (sel) => { const el = document.querySelector(sel); if (el) { el.click(); return true; } return false; },
     args: [selector]
   });
+  return !!results[0]?.result;
 }
 
 async function fillInput(selector, value) {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tabs[0]) throw new Error('No active tab');
-  await chrome.scripting.executeScript({
-    target: { tabId: tabs[0].id },
+  const tab = await getActiveTab();
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
     func: (sel, val) => {
       const el = document.querySelector(sel);
       if (!el) return false;
-      el.value = val;
+      const proto = el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(el, val); else el.value = val;
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     },
     args: [selector, value]
   });
+  return !!results[0]?.result;
 }
+
+// ─── Auto-update check ────────────────────────────────────────────
+
+async function checkForUpdate() {
+  try {
+    const res = await fetch(REPO_API);
+    if (!res.ok) return; // private repo => 404, ignore
+    const data = await res.json();
+    const latest = (data.tag_name || '').replace(/^v/, '');
+    if (latest && isNewerVersion(latest, CURRENT_VERSION)) {
+      await chrome.storage.local.set({ updateAvailable: true, updateVersion: latest });
+      chrome.notifications.create('update-available', {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Update Tersedia',
+        message: `v${latest} siap. Jalankan update.bat lalu reload extension.`,
+        priority: 2
+      });
+    }
+  } catch (e) {
+    console.log('[BG] Update check skipped:', e.message);
+  }
+}
+
+function isNewerVersion(latest, current) {
+  const l = String(latest).split('.').map(Number);
+  const c = String(current).split('.').map(Number);
+  for (let i = 0; i < Math.max(l.length, c.length); i++) {
+    if ((l[i] || 0) > (c[i] || 0)) return true;
+    if ((l[i] || 0) < (c[i] || 0)) return false;
+  }
+  return false;
+}
+
+// ─── Message router (SYNC responses only — never await a loop) ────
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  switch (message.type) {
+    case 'status-check': {
+      // Must answer synchronously-ish; read storage then respond.
+      (async () => {
+        const stored = await chrome.storage.local.get([
+          'botToken', 'deviceName', 'deviceId', 'chatId',
+          'pollingEnabled', 'lastPollOk', 'lastPollError',
+          'updateAvailable', 'updateVersion'
+        ]);
+        sendResponse({
+          configured: !!(stored.botToken && stored.deviceName),
+          deviceName: stored.deviceName || '',
+          deviceId: stored.deviceId || '',
+          chatId: stored.chatId ? String(stored.chatId) : '',
+          polling: !!stored.pollingEnabled,
+          lastPollOk: stored.lastPollOk || 0,
+          lastPollError: stored.lastPollError || '',
+          updateAvailable: !!stored.updateAvailable,
+          updateVersion: stored.updateVersion || '',
+          version: CURRENT_VERSION
+        });
+      })();
+      return true; // async response
+    }
+
+    case 'start-polling': {
+      (async () => {
+        try {
+          await TelegramBridge.init();
+          if (!TelegramBridge.isConfigured()) {
+            sendResponse({ success: false, error: 'Belum dikonfigurasi. Isi Settings dulu.' });
+            return;
+          }
+          if (!TelegramBridge.chatId) {
+            // try to auto-link from pending updates
+            try {
+              await TelegramBridge.linkChatFromUpdates();
+            } catch (e) { /* ignore */ }
+          }
+          if (!TelegramBridge.chatId) {
+            sendResponse({ success: false, error: 'Chat belum ke-link. Kirim pesan ke bot dulu, lalu klik Start lagi.' });
+            return;
+          }
+          await setPollingEnabled(true);
+          chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
+          await logEvent('polling enabled');
+          // immediately do one tick so the "online" message goes out
+          try {
+            await TelegramBridge.sendMessage(
+              `🟢 <b>${escapeHtml(TelegramBridge.deviceName)}</b> online\n` +
+              `Device ID: <code>${escapeHtml(TelegramBridge.deviceId)}</code>\n` +
+              `Version: ${CURRENT_VERSION}`
+            );
+          } catch (e) {
+            await logEvent('send online failed: ' + e.message);
+            sendResponse({ success: false, error: 'Gagal kirim pesan Telegram: ' + e.message });
+            return;
+          }
+          await pollTick();
+          sendResponse({ success: true, message: 'Polling aktif' });
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+      })();
+      return true;
+    }
+
+    case 'stop-polling': {
+      (async () => {
+        await setPollingEnabled(false);
+        sendResponse({ success: true });
+      })();
+      return true;
+    }
+
+    case 'config-update': {
+      (async () => {
+        await TelegramBridge.saveConfig(message.config || {});
+        await TelegramBridge.init();
+        sendResponse({ success: true });
+      })();
+      return true;
+    }
+
+    case 'check-update': {
+      (async () => {
+        await checkForUpdate();
+        const stored = await chrome.storage.local.get(['updateAvailable', 'updateVersion']);
+        sendResponse(stored);
+      })();
+      return true;
+    }
+
+    case 'run-command': {
+      (async () => {
+        const result = await executeCommand(message.command || '');
+        sendResponse(result);
+      })();
+      return true;
+    }
+
+    default:
+      return false;
+  }
+});

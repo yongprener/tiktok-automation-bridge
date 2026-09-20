@@ -1,94 +1,94 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
   <meta charset="UTF-8">
   <title>TikTok Automation Bridge — Settings</title>
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      max-width: 480px;
-      margin: 40px auto;
-      padding: 24px;
-      background: #1a1a2e;
-      color: #e0e0e0;
+      max-width: 520px; margin: 40px auto; padding: 24px;
+      background: #1a1a2e; color: #e0e0e0;
     }
     h1 { font-size: 22px; margin: 0 0 24px; }
     h2 { font-size: 16px; margin: 24px 0 8px; color: #aaa; }
     .field { margin-bottom: 16px; }
     label { display: block; font-size: 13px; margin-bottom: 4px; color: #888; }
     input[type="text"], input[type="password"] {
-      width: 100%;
-      padding: 10px;
-      border: 1px solid #333;
-      border-radius: 6px;
-      background: #16213e;
-      color: #e0e0e0;
-      font-size: 14px;
-      box-sizing: border-box;
+      width: 100%; padding: 10px; border: 1px solid #333;
+      border-radius: 6px; background: #16213e; color: #e0e0e0;
+      font-size: 14px; box-sizing: border-box;
     }
     .btn {
-      padding: 10px 24px;
-      border: none;
-      border-radius: 6px;
-      font-size: 14px;
-      cursor: pointer;
-      margin-right: 8px;
+      padding: 10px 24px; border: none; border-radius: 6px;
+      font-size: 14px; cursor: pointer; margin-right: 8px; margin-bottom: 8px;
     }
     .btn-primary { background: #0f3460; color: white; }
     .btn-secondary { background: #16213e; color: #e0e0e0; border: 1px solid #333; }
     .btn:hover { opacity: 0.85; }
-    .info-box {
-      background: #16213e;
-      border-radius: 8px;
-      padding: 12px;
-      margin: 16px 0;
-      font-size: 13px;
-    }
-    .info-row { display: flex; justify-content: space-between; padding: 4px 0; }
-    .info-label { color: #888; }
+    .info-box { background: #16213e; border-radius: 8px; padding: 12px; margin: 16px 0; font-size: 13px; }
+    .info-row { display: flex; justify-content: space-between; padding: 4px 0; gap: 12px; }
+    .info-label { color: #888; white-space: nowrap; }
+    .info-value { word-break: break-all; text-align: right; }
     .muted { color: #666; font-size: 12px; }
-    .success { color: #4caf50; }
-    .error { color: #f44336; }
+    .success { color: #4caf50; font-size: 13px; }
+    .error { color: #f44336; font-size: 13px; }
+    ol { color: #999; font-size: 13px; line-height: 1.7; }
+    code { background: #0d0d1a; padding: 2px 5px; border-radius: 3px; font-size: 12px; }
   </style>
 </head>
 <body>
   <h1>🔧 TikTok Automation Bridge</h1>
-  
+
   <div class="info-box">
     <div class="info-row">
       <span class="info-label">Device ID</span>
-      <span id="deviceId">—</span>
+      <span class="info-value" id="deviceId">—</span>
     </div>
     <div class="info-row">
       <span class="info-label">Chrome Profile</span>
-      <span id="profile">—</span>
+      <span class="info-value" id="profile">—</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Chat ID</span>
+      <span class="info-value" id="chatId">—</span>
     </div>
     <div class="info-row">
       <span class="info-label">Status</span>
-      <span id="status">—</span>
+      <span class="info-value" id="status">—</span>
     </div>
   </div>
 
   <h2>Configuration</h2>
-  
+
   <div class="field">
     <label for="deviceName">Device Name</label>
-    <input type="text" id="deviceName" placeholder="e.g. laptop-rumah, pc-kantor" />
-    <p class="muted">Give this device a name. Commands will target it by name.</p>
+    <input type="text" id="deviceName" placeholder="cth: laptop-lenovo, pc-kantor" />
+    <p class="muted">Nama device ini. Command nanti ditarget pakai nama ini (misal <code>@laptop-lenovo screenshot</code>)</p>
   </div>
-  
+
   <div class="field">
     <label for="botToken">Telegram Bot Token</label>
     <input type="password" id="botToken" placeholder="123456789:ABCdef..." />
-    <p class="muted">Bot token from @BotFather. Used to communicate with Hermes Agent.</p>
+    <p class="muted">Dari @BotFather. Pakai bot <b>terpisah</b> dari bot Hermes (jangan sama, nanti rebutan pesan).</p>
   </div>
-  
+
   <div class="field">
     <button class="btn btn-primary" id="btnSave">Save</button>
     <button class="btn btn-secondary" id="btnTest">Test Connection</button>
+    <button class="btn btn-secondary" id="btnRelink">Re-link Chat</button>
   </div>
-  
+
   <div id="result"></div>
+
+  <h2>Cara pakai</h2>
+  <ol>
+    <li>Bikin bot baru di @BotFather → <code>/newbot</code></li>
+    <li>Paste token-nya di atas → <b>Save</b></li>
+    <li>Kirim pesan apa aja ke bot itu di Telegram</li>
+    <li>Klik <b>Test Connection</b> → Chat ID ke-link</li>
+    <li>Buka popup extension → <b>Start</b></li>
+    <li>Chat perintah ke bot, misal: <code>buka tiktok.com</code> atau <code>screenshot</code></li>
+  </ol>
 
   <script src="options.js"></script>
 </body>
