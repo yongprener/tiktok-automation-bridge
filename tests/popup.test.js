@@ -17,6 +17,12 @@ const vm = require('vm');
 const EXT = path.join(__dirname, '..', 'chrome-extension');
 const popupSrc = fs.readFileSync(path.join(EXT, 'popup.js'), 'utf8');
 
+// The popup reads chrome.runtime.getManifest().version — stub it from the
+// real manifest so tests exercise the actual source of truth.
+const MANIFEST_VERSION = JSON.parse(
+  fs.readFileSync(path.join(EXT, 'manifest.json'), 'utf8')
+).version;
+
 let pass = 0, fail = 0;
 const t = (name, cond, extra) => {
   if (cond) { pass++; console.log('  ✅ ' + name); }
@@ -82,6 +88,7 @@ sandbox.chrome = {
     }
   },
   runtime: {
+    getManifest: () => ({ version: MANIFEST_VERSION }),
     sendMessage: async (msg) => {
       if (swThrows) throw new Error('Receiving end does not exist');
       if (msg.type === 'status-check') return swResponse;
@@ -173,6 +180,28 @@ async function boot() {
   await boot();
   t('error banner visible', els.errBox.textContent.indexOf('401') !== -1, els.errBox.textContent);
   t('status warns polling error', els.status.innerHTML.indexOf('error') !== -1, els.status.innerHTML);
+
+  console.log('\nH) Update row: no public feed -> honest "jalankan update.bat"');
+  storageData = {
+    botToken: '1:a', deviceName: 'd', chatId: '5',
+    pollingEnabled: false, updateAvailable: false, updateChannel: 'manual'
+  };
+  await boot();
+  t('update button visible', els.btnUpdate.textContent.length > 0, els.btnUpdate.textContent);
+  t('points at the updater script', /update\.(bat|sh)/.test(els.btnUpdate.textContent), els.btnUpdate.textContent);
+  t('mode=manual', els.btnUpdate.dataset.mode === 'manual', els.btnUpdate.dataset.mode);
+
+  console.log('\nI) Update row: real feed update advertised');
+  storageData = {
+    botToken: '1:a', deviceName: 'd', chatId: '5',
+    pollingEnabled: false, updateAvailable: true, updateVersion: '0.3.0', updateChannel: 'feed'
+  };
+  await boot();
+  t('shows the new version', els.btnUpdate.textContent.indexOf('0.3.0') !== -1, els.btnUpdate.textContent);
+  t('mode=available', els.btnUpdate.dataset.mode === 'available');
+
+  console.log('\nJ) Version displayed comes from the manifest');
+  t('popup shows v' + MANIFEST_VERSION, els.version.textContent === 'v' + MANIFEST_VERSION, els.version.textContent);
 
   console.log(`\n═══ ${pass} passed, ${fail} failed ═══`);
   process.exit(fail ? 1 : 0);

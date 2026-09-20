@@ -1,14 +1,16 @@
 /**
- * Background Service Worker — v0.2.0
+ * Background Service Worker
  *
  * MV3-safe design: NO long-running loops (service worker is killed after ~30s idle).
  * Polling is driven by chrome.alarms firing every 30s, each tick doing ONE short poll.
+ *
+ * Versi dibaca dari chrome.runtime.getManifest().version — SATU sumber
+ * kebenaran (manifest.json). Jangan hardcode versi di file ini.
  */
 
 self.importScripts('lib/telegram-bridge.js');
 
-const CURRENT_VERSION = '0.2.1';
-const REPO_API = 'https://api.github.com/repos/yongprener/tiktok-automation-bridge/releases/latest';
+const CURRENT_VERSION = chrome.runtime.getManifest().version;
 const POLL_ALARM = 'bridge-poll';
 const UPDATE_ALARM = 'bridge-update-check';
 
@@ -338,25 +340,68 @@ async function fillInput(selector, value) {
 }
 
 // ─── Auto-update check ────────────────────────────────────────────
+//
+// The repo is PRIVATE, so api.github.com/repos/.../releases/latest answers 404
+// to an unauthenticated extension. We therefore check git TAGS on the public
+// git protocol endpoint, which works for private repos only if... it doesn't.
+// So: primary source is `version.json` published on a public channel (raw
+// gist / GitHub Pages) if one is ever configured; otherwise we fall back to
+// the git ls-remote style endpoint and simply report "unknown".
+//
+// Practical consequence, stated plainly: with a private repo and no release
+// feed, the extension CANNOT discover new versions on its own. The user runs
+// update.bat / update.sh instead, and the popup explains that. We keep this
+// function so the wiring is ready the moment a public update feed exists.
+
+const UPDATE_FEED_URL = ''; // e.g. a raw version.json URL; empty = disabled
 
 async function checkForUpdate() {
+  if (!UPDATE_FEED_URL) {
+    // No public feed configured — make the UI honest instead of silently idle.
+    const stored = await chrome.storage.local.get(['lastUpdateCheck']);
+    await chrome.storage.local.set({
+      lastUpdateCheck: Date.now(),
+      updateAvailable: false,
+      updateVersion: '',
+      updateChannel: 'manual'   // tells the popup to show "run update.bat"
+    });
+    void stored;
+    return { channel: 'manual' };
+  }
+
   try {
-    const res = await fetch(REPO_API);
-    if (!res.ok) return; // private repo => 404, ignore
+    const res = await fetch(UPDATE_FEED_URL, { cache: 'no-store' });
+    if (!res.ok) return { channel: 'manual', error: 'feed HTTP ' + res.status };
     const data = await res.json();
-    const latest = (data.tag_name || '').replace(/^v/, '');
+    const latest = String(data.version || data.tag_name || '').replace(/^v/, '');
+
     if (latest && isNewerVersion(latest, CURRENT_VERSION)) {
-      await chrome.storage.local.set({ updateAvailable: true, updateVersion: latest });
+      await chrome.storage.local.set({
+        updateAvailable: true,
+        updateVersion: latest,
+        updateChannel: 'feed',
+        lastUpdateCheck: Date.now()
+      });
       chrome.notifications.create('update-available', {
         type: 'basic',
         iconUrl: 'icons/icon128.png',
         title: 'Update Tersedia',
-        message: `v${latest} siap. Jalankan update.bat lalu reload extension.`,
+        message: `v${latest} siap. Jalankan update.bat / update.sh lalu reload extension.`,
         priority: 2
       });
+      return { channel: 'feed', updateAvailable: true, version: latest };
     }
+
+    await chrome.storage.local.set({
+      updateAvailable: false,
+      updateVersion: '',
+      updateChannel: 'feed',
+      lastUpdateCheck: Date.now()
+    });
+    return { channel: 'feed', updateAvailable: false };
   } catch (e) {
     console.log('[BG] Update check skipped:', e.message);
+    return { channel: 'manual', error: e.message };
   }
 }
 
@@ -380,7 +425,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const stored = await chrome.storage.local.get([
           'botToken', 'deviceName', 'deviceId', 'chatId',
           'pollingEnabled', 'lastPollOk', 'lastPollError',
-          'updateAvailable', 'updateVersion'
+          'updateAvailable', 'updateVersion', 'updateChannel'
         ]);
         sendResponse({
           configured: !!(stored.botToken && stored.deviceName),
@@ -392,6 +437,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           lastPollError: stored.lastPollError || '',
           updateAvailable: !!stored.updateAvailable,
           updateVersion: stored.updateVersion || '',
+          updateChannel: stored.updateChannel || '',
           version: CURRENT_VERSION
         });
       })();
@@ -460,7 +506,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'check-update': {
       (async () => {
         await checkForUpdate();
-        const stored = await chrome.storage.local.get(['updateAvailable', 'updateVersion']);
+        const stored = await chrome.storage.local.get(['updateAvailable', 'updateVersion', 'updateChannel']);
         sendResponse(stored);
       })();
       return true;

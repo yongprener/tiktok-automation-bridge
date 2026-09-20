@@ -9,6 +9,12 @@ const vm = require('vm');
 
 const EXT = path.join(__dirname, '..', 'chrome-extension');
 
+// Version comes from the real manifest — the code under test reads
+// chrome.runtime.getManifest().version, so the stub must mirror that.
+const MANIFEST_VERSION = JSON.parse(
+  fs.readFileSync(path.join(EXT, 'manifest.json'), 'utf8')
+).version;
+
 // ── Fake storage ──────────────────────────────────────────────────
 const store = {
   botToken: '123:FAKE',
@@ -44,7 +50,8 @@ function makeChrome() {
     runtime: {
       onInstalled: { addListener: (fn) => listeners.installed.push(fn) },
       onStartup: { addListener: (fn) => listeners.startup.push(fn) },
-      onMessage: { addListener: (fn) => listeners.message.push(fn) }
+      onMessage: { addListener: (fn) => listeners.message.push(fn) },
+      getManifest: () => ({ version: MANIFEST_VERSION })
     },
     tabs: {
       query: async () => [{ id: 1, windowId: 1, url: 'https://example.com', title: 'Example' }],
@@ -157,7 +164,7 @@ function sendMessage(msg, timeoutMs = 3000) {
   let r = await sendMessage({ type: 'status-check' });
   t('returns object', !!r);
   t('configured=true', r && r.configured === true, JSON.stringify(r));
-  t('version=0.2.1', r && r.version === '0.2.1', r && r.version);
+  t('version matches manifest', r && r.version === MANIFEST_VERSION, r && r.version + ' vs ' + MANIFEST_VERSION);
   t('chatId preserved', r && r.chatId === '7750244035', r && r.chatId);
 
   console.log('\n1b) status-check reads FRESH storage (not stale in-memory values)');
@@ -259,6 +266,19 @@ function sendMessage(msg, timeoutMs = 3000) {
   r = await sendMessage({ type: 'start-polling' });
   t('success=true', r && r.success === true, JSON.stringify(r));
   t('chatId auto-linked to 999', String(store.chatId) === '999', String(store.chatId));
+
+  console.log('\n14) update check with no public feed reports channel=manual (not silent)');
+  delete store.updateChannel;
+  r = await sendMessage({ type: 'check-update' });
+  t('responds', !!r);
+  t('channel=manual', store.updateChannel === 'manual', String(store.updateChannel));
+  t('no phantom update offered', store.updateAvailable === false, String(store.updateAvailable));
+  t('timestamp recorded', typeof store.lastUpdateCheck === 'number');
+
+  console.log('\n15) status-check exposes updateChannel to the popup');
+  r = await sendMessage({ type: 'status-check' });
+  t('updateChannel present', r && r.updateChannel === 'manual', r && String(r.updateChannel));
+  t('version is manifest version', r && r.version === MANIFEST_VERSION, r && r.version);
 
   console.log(`\n═══ ${pass} passed, ${fail} failed ═══`);
   process.exit(fail ? 1 : 0);

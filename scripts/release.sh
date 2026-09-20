@@ -59,13 +59,17 @@ with open(manifest, 'w') as f:
     json.dump(m, f, indent=2, ensure_ascii=False)
     f.write('\n')
 
-for path, pattern in ((bg, r"CURRENT_VERSION"), (popup, r"EXPECTED_VERSION")):
-    s = open(path, encoding='utf-8').read()
-    s2, n = re.subn(rf"({pattern}\s*=\s*')[^']+(')", rf"\g<1>{new}\g<2>", s)
-    assert n == 1, f"{path}: expected 1 match for {pattern}, got {n}"
-    open(path, 'w', encoding='utf-8').write(s2)
+# background.js / popup.js deliberately do NOT carry a version literal — they
+# read chrome.runtime.getManifest().version. Assert that, so a future edit
+# that reintroduces a hardcoded copy fails loudly here.
+for path in (bg, popup):
+    src = open(path, encoding='utf-8').read()
+    assert 'chrome.runtime.getManifest().version' in src, \
+        f"{path}: must derive version from the manifest"
+    assert not re.search(r"(?:CURRENT_VERSION|EXPECTED_VERSION)\s*=\s*'", src), \
+        f"{path}: hardcoded version literal found"
 
-print(f"  updated {manifest}, {bg}, {popup}")
+print(f"  manifest.json -> {new} (JS files read it at runtime)")
 PY
 
 # ── CHANGELOG ────────────────────────────────────────────────────

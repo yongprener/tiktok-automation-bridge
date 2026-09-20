@@ -1,5 +1,10 @@
 /**
- * Popup Logic — v0.2.1
+ * Popup Logic
+ *
+ * Versi dibaca dari chrome.runtime.getManifest().version — SATU sumber
+ * kebenaran. Jangan hardcode versi di file ini; kalau di-hardcode, versi di
+ * popup bisa beda dengan manifest dan muncul banner "service worker basi"
+ * palsu.
  *
  * PENTING: config (device, chat, polling) dibaca LANGSUNG dari chrome.storage.local.
  * Popup TIDAK boleh bergantung pada service worker untuk kebenaran data — kalau
@@ -7,7 +12,7 @@
  * status basi ("Not configured" padahal storage sudah terisi).
  */
 
-const EXPECTED_VERSION = '0.2.1';
+const EXPECTED_VERSION = chrome.runtime.getManifest().version;
 
 let currentState = null;
 let logsOpen = false;
@@ -33,7 +38,7 @@ async function refresh(checkUpdate = false) {
     s = await chrome.storage.local.get([
       'botToken', 'deviceName', 'deviceId', 'chatId',
       'pollingEnabled', 'lastPollOk', 'lastPollError',
-      'updateAvailable', 'updateVersion'
+      'updateAvailable', 'updateVersion', 'updateChannel'
     ]);
   } catch (e) {
     setStatus('red', 'Gagal baca storage');
@@ -124,13 +129,22 @@ async function refresh(checkUpdate = false) {
     errEl.textContent = '';
   }
 
-  // Update button
+  // Update button. The repo is private and there is no public release feed, so
+  // the extension genuinely cannot self-discover new versions — be honest and
+  // point at the updater script instead of showing a button that never fires.
   const upBtn = document.getElementById('btnUpdate');
+  const channel = s.updateChannel || '';
   if (s.updateAvailable && s.updateVersion) {
     upBtn.classList.remove('hidden');
     upBtn.textContent = '⬆ Update v' + s.updateVersion + ' tersedia';
+    upBtn.dataset.mode = 'available';
+  } else if (channel === 'manual') {
+    upBtn.classList.remove('hidden');
+    upBtn.textContent = 'Update: jalankan update.bat';
+    upBtn.dataset.mode = 'manual';
   } else {
     upBtn.classList.add('hidden');
+    upBtn.dataset.mode = '';
   }
 
   if (logsOpen) await renderLogs();
@@ -200,8 +214,19 @@ async function renderLogs() {
 
 async function doUpdate() {
   const btn = document.getElementById('btnUpdate');
-  btn.textContent = '⬆ Jalankan update.bat, lalu reload extension';
-  setTimeout(refresh, 2500);
+  // Extension unpacked tidak bisa menimpa file-nya sendiri sambil jalan.
+  // Arahkan user ke skrip updater, lalu jelaskan langkah reload-nya.
+  btn.textContent = 'Jalankan update.bat / update.sh, lalu klik ⟳ di chrome://extensions';
+  try {
+    chrome.notifications?.create('update-howto', {
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'Cara update',
+      message: 'Jalankan update.bat (Windows) atau update.sh (Mac/Linux) di folder project, lalu klik tombol reload di chrome://extensions.',
+      priority: 2
+    });
+  } catch (e) { /* notifications opsional */ }
+  setTimeout(refresh, 3000);
 }
 
 function setStatus(color, text) {
