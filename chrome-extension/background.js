@@ -1,10 +1,13 @@
 /**
  * Background Service Worker
- * Main orchestrator: init bridge, poll commands, dispatch to content scripts.
+ * Main orchestrator: init bridge, poll commands, auto-update check, dispatch.
  */
 
-// Import bridge as a script (not ES module — more compatible)
 self.importScripts('lib/telegram-bridge.js');
+
+const CURRENT_VERSION = '0.1.0';
+const REPO_API = 'https://api.github.com/repos/yongprener/tiktok-automation-bridge/releases/latest';
+const REPO_DOWNLOAD = 'https://github.com/yongprener/tiktok-automation-bridge/archive/refs/heads/main.zip';
 
 let activeTabId = null;
 
@@ -13,18 +16,20 @@ let activeTabId = null;
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log('[BG] Installed/updated:', details.reason);
   await TelegramBridge.init();
-  
+
   if (details.reason === 'install') {
     chrome.runtime.openOptionsPage();
   }
-  
+
   chrome.alarms.create('poll', { periodInMinutes: 0.5 });
+  chrome.alarms.create('update-check', { periodInMinutes: 30 });
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   console.log('[BG] Browser started');
   await TelegramBridge.init();
   chrome.alarms.create('poll', { periodInMinutes: 0.5 });
+  chrome.alarms.create('update-check', { periodInMinutes: 30 });
 });
 
 // ─── Alarm Handler ────────────────────────────────────────────────
@@ -34,32 +39,74 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (TelegramBridge.isConfigured() && !TelegramBridge.polling) {
       await TelegramBridge.startPolling();
     }
+  } else if (alarm.name === 'update-check') {
+    await checkForUpdate();
   }
 });
+
+// ─── Auto-Update ──────────────────────────────────────────────────
+
+async function checkForUpdate() {
+  try {
+    const response = await fetch(REPO_API);
+    if (!response.ok) return;
+
+    const data = await response.json();
+    const latestVersion = (data.tag_name || '').replace(/^v/, '');
+
+    if (isNewerVersion(latestVersion, CURRENT_VERSION)) {
+      // Show desktop notification
+      chrome.notifications.create('update-available', {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: 'Update Available',
+        message: `v${latestVersion} is ready. Run update.sh (Mac/Linux) or update.bat (Windows).`,
+        priority: 2
+      });
+
+      // Also store for popup
+      await chrome.storage.local.set({
+        updateAvailable: true,
+        updateVersion: latestVersion
+      });
+    }
+  } catch (e) {
+    console.log('[BG] Update check failed:', e.message);
+  }
+}
+
+function isNewerVersion(latest, current) {
+  if (!latest) return false;
+  const l = latest.split('.').map(Number);
+  const c = current.split('.').map(Number);
+  for (let i = 0; i < Math.max(l.length, c.length); i++) {
+    if ((l[i] || 0) > (c[i] || 0)) return true;
+    if ((l[i] || 0) < (c[i] || 0)) return false;
+  }
+  return false;
+}
 
 // ─── Message Router ───────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Status check — always respond synchronously
   if (message.type === 'status-check') {
     sendResponse({
       configured: TelegramBridge.isConfigured(),
       deviceName: TelegramBridge.deviceName,
       deviceId: TelegramBridge.deviceId,
-      polling: TelegramBridge.polling
+      polling: TelegramBridge.polling,
+      version: CURRENT_VERSION
     });
     return false;
   }
-  
-  // Config update
+
   if (message.type === 'config-update') {
     TelegramBridge.saveConfig(message.config).then(() => {
       sendResponse({ success: true });
     });
     return true;
   }
-  
-  // Start polling
+
   if (message.type === 'start-polling') {
     TelegramBridge.startPolling().then(() => {
       sendResponse({ success: true });
@@ -68,20 +115,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   }
-  
-  // Stop polling
+
   if (message.type === 'stop-polling') {
     TelegramBridge.stopPolling();
     sendResponse({ success: true });
     return false;
   }
-  
-  // Bridge command
+
+  if (message.type === 'check-update') {
+    checkForUpdate().then(() => {
+      chrome.storage.local.get(['updateAvailable', 'updateVersion']).then((res) => {
+        sendResponse(res);
+      });
+    });
+    return true;
+  }
+
   if (message.type === 'bridge-command') {
     handleCommand(message.command, sender, sendResponse);
     return true;
   }
-  
+
   return false;
 });
 
@@ -89,10 +143,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleCommand(command, sender, sendResponse) {
   console.log('[BG] Command:', command);
-  
   const parts = (command || '').toLowerCase().split(/\s+/);
   const action = parts[0];
-  
+
   try {
     switch (action) {
       case 'navigate':
@@ -102,27 +155,23 @@ async function handleCommand(command, sender, sendResponse) {
         sendResponse({ success: true, message: `Navigated to ${url}` });
         break;
       }
-      
       case 'screenshot': {
         const dataUrl = await captureScreenshot();
         sendResponse({ success: true, screenshot: dataUrl });
         break;
       }
-      
       case 'scrape': {
         const selector = parts.slice(1).join(' ');
         const result = await scrapeContent(selector);
         sendResponse({ success: true, data: result });
         break;
       }
-      
       case 'click': {
         const selector = parts.slice(1).join(' ');
         await clickElement(selector);
         sendResponse({ success: true });
         break;
       }
-      
       case 'fill': {
         const match = command.match(/fill\s+(\S+)\s*=\s*(.+)/i);
         if (match) {
@@ -133,7 +182,6 @@ async function handleCommand(command, sender, sendResponse) {
         }
         break;
       }
-      
       case 'status': {
         sendResponse({
           success: true,
@@ -141,12 +189,12 @@ async function handleCommand(command, sender, sendResponse) {
             deviceName: TelegramBridge.deviceName,
             deviceId: TelegramBridge.deviceId,
             polling: TelegramBridge.polling,
+            version: CURRENT_VERSION,
             activeTab: activeTabId
           }
         });
         break;
       }
-      
       default: {
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tabs[0]) {
@@ -177,10 +225,8 @@ async function navigateToUrl(url) {
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     url = 'https://' + url;
   }
-  
   const tab = await chrome.tabs.create({ url, active: true });
   activeTabId = tab.id;
-  
   return new Promise((resolve) => {
     chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
       if (tabId === tab.id && info.status === 'complete') {
@@ -200,7 +246,6 @@ async function captureScreenshot() {
 async function scrapeContent(selector) {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tabs[0]) throw new Error('No active tab');
-  
   const results = await chrome.scripting.executeScript({
     target: { tabId: tabs[0].id },
     func: (sel) => {
@@ -215,21 +260,15 @@ async function scrapeContent(selector) {
     },
     args: [selector]
   });
-  
   return results[0]?.result || [];
 }
 
 async function clickElement(selector) {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tabs[0]) throw new Error('No active tab');
-  
   await chrome.scripting.executeScript({
     target: { tabId: tabs[0].id },
-    func: (sel) => {
-      const el = document.querySelector(sel);
-      if (el) el.click();
-      return !!el;
-    },
+    func: (sel) => { const el = document.querySelector(sel); if (el) el.click(); return !!el; },
     args: [selector]
   });
 }
@@ -237,7 +276,6 @@ async function clickElement(selector) {
 async function fillInput(selector, value) {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tabs[0]) throw new Error('No active tab');
-  
   await chrome.scripting.executeScript({
     target: { tabId: tabs[0].id },
     func: (sel, val) => {
