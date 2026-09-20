@@ -23,6 +23,17 @@ const MANIFEST_VERSION = JSON.parse(
   fs.readFileSync(path.join(EXT, 'manifest.json'), 'utf8')
 ).version;
 
+// A version guaranteed to differ from the manifest, whatever the current
+// release is — used to simulate a service worker running older code.
+const STALE_VERSION = '0.0.1-stale';
+
+// A version guaranteed to be NEWER than the manifest, so the "update
+// advertised" scenario keeps working after every release.
+const NEXT_VERSION = (() => {
+  const [a, b, c] = MANIFEST_VERSION.split('.').map(Number);
+  return `${a}.${b}.${(c || 0) + 1}`;
+})();
+
 let pass = 0, fail = 0;
 const t = (name, cond, extra) => {
   if (cond) { pass++; console.log('  ✅ ' + name); }
@@ -112,13 +123,13 @@ async function boot() {
 }
 
 (async () => {
-  console.log('\nA) THE REPORTED BUG: storage is configured, SW is stale (v0.1.0, configured:false)');
+  console.log('\nA) THE REPORTED BUG: storage is configured, SW is stale (configured:false)');
   storageData = {
     botToken: '123:FAKE', deviceName: 'len-yongprener21',
     deviceId: 'dev_mu9ex4mh56fbuk', chatId: '7750244035',
     pollingEnabled: false
   };
-  swResponse = { version: '0.1.0', configured: false, deviceName: '', chatId: '', polling: false };
+  swResponse = { version: STALE_VERSION, configured: false, deviceName: '', chatId: '', polling: false };
   identityEmail = '';
   await boot();
 
@@ -129,11 +140,11 @@ async function boot() {
   t('polling Idle', els.polling.textContent === 'Idle', els.polling.textContent);
   t('profile shows Chat linked (not "Not linked")',
     els.profile.textContent.indexOf('Chat linked') === 0, els.profile.textContent);
-  t('STALE SW banner shown', els.warnBox.textContent.indexOf('0.1.0') !== -1, els.warnBox.textContent);
+  t('STALE SW banner shown', els.warnBox.textContent.indexOf(STALE_VERSION) !== -1, els.warnBox.textContent);
 
   console.log('\nB) Not configured for real -> Open Settings');
   storageData = { deviceId: 'dev_x' };
-  swResponse = { version: '0.2.1', configured: false };
+  swResponse = { version: MANIFEST_VERSION, configured: false };
   await boot();
   t('status Not configured', els.status.innerHTML.indexOf('Not configured') !== -1, els.status.innerHTML);
   t('button Open Settings', els.btnToggle.textContent.indexOf('Open Settings') !== -1, els.btnToggle.textContent);
@@ -144,7 +155,7 @@ async function boot() {
     botToken: '123:FAKE', deviceName: 'laptop', chatId: '99',
     pollingEnabled: true, lastPollOk: Date.now()
   };
-  swResponse = { version: '0.2.1', configured: true, chatId: '99', polling: true };
+  swResponse = { version: MANIFEST_VERSION, configured: true, chatId: '99', polling: true };
   await boot();
   t('status Connected', els.status.innerHTML.indexOf('Connected') !== -1, els.status.innerHTML);
   t('button Stop', els.btnToggle.textContent === 'Stop', els.btnToggle.textContent);
@@ -194,10 +205,10 @@ async function boot() {
   console.log('\nI) Update row: real feed update advertised');
   storageData = {
     botToken: '1:a', deviceName: 'd', chatId: '5',
-    pollingEnabled: false, updateAvailable: true, updateVersion: '0.3.0', updateChannel: 'feed'
+    pollingEnabled: false, updateAvailable: true, updateVersion: NEXT_VERSION, updateChannel: 'feed'
   };
   await boot();
-  t('shows the new version', els.btnUpdate.textContent.indexOf('0.3.0') !== -1, els.btnUpdate.textContent);
+  t('shows the new version', els.btnUpdate.textContent.indexOf(NEXT_VERSION) !== -1, els.btnUpdate.textContent);
   t('mode=available', els.btnUpdate.dataset.mode === 'available');
 
   console.log('\nJ) Version displayed comes from the manifest');
