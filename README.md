@@ -54,8 +54,22 @@ Web pages (real Chrome, real cookies, real fingerprint)
 
 ## Commands
 
-Send these to your bridge bot. Prefix with `@<device-name>` if you run more
-than one device.
+You can talk normally — no need to memorise syntax. Prefix with
+`@<device-name>` if you run more than one device.
+
+**Plain language**
+
+```
+buka tiktok.com
+check dan ambil data analitik di https://www.tiktok.com/tiktokstudio/analytics
+ambil data di shop.tiktok.com/produk
+baca halaman https://example.com
+audit https://example.com
+cek captcha di https://example.com
+screenshot
+```
+
+**Technical commands** — still work exactly as before
 
 | Command | What it does |
 | --- | --- |
@@ -65,11 +79,57 @@ than one device.
 | `text` / `teks` | Dump the active tab's visible text |
 | `click <css-selector>` | Click an element |
 | `fill <selector>=<value>` | Type into an input (React-safe) |
+| `waitfor <css-selector>` | Wait for an element to appear (20s) |
 | `tabs` | List open tabs |
 | `status` | Device info and version |
 | `help` | Command list |
 
-Example: `@laptop-lenovo scrape h1`
+## Skills
+
+A skill is a JSON recipe: a sequence of browser steps with variables. One
+message runs the whole thing.
+
+```
+skill                          # list available skills
+skill run scrape-tiktokshop url=https://shop.tiktok.com/x items=40
+```
+
+Bundled skills:
+
+| id | What it does |
+| --- | --- |
+| `scrape-tiktokshop` | Open a TikTok Shop page, check for CAPTCHA, scroll to load, collect products |
+| `check-captcha` | Open a URL and report whether a CAPTCHA is present |
+| `page-audit` | Title, link count, image count, screenshot — use before writing selectors |
+| `scroll-and-read` | Scroll to the bottom (lazy-load) then dump the page text |
+| `watch-element` | Wait for a selector to appear, then screenshot |
+
+### Step actions
+
+`navigate`, `wait`, `waitFor`, `click`, `fill`, `scroll`, `collect`, `assert`,
+`screenshot`, `report`.
+
+`collect` fields support `@self` (own text), `:text`, `@attr:<name>` and plain
+CSS sub-selectors; `{{var}}` in any step is substituted from earlier results.
+
+### Writing your own
+
+Edit `chrome-extension/skills/bundled.json`, or save a skill at runtime via the
+`skill-save` message. Then regenerate the inlined copy — a service worker cannot
+`fetch()` its own packaged files:
+
+```bash
+python3 scripts/sync-skills.py            # regenerate
+python3 scripts/sync-skills.py --check    # verify (run.sh does this)
+```
+
+### Surviving MV3 suspension
+
+Chrome kills the service worker after ~30s idle, and a multi-step scrape easily
+exceeds that. The runner persists `{skillId, index, vars}` after **every** step
+and resumes from the last completed step — so a suspended worker costs you a
+30-second delay, not a lost run. A run abandoned for over 5 minutes is dropped
+rather than resurrected.
 
 ## Updating
 
@@ -116,14 +176,16 @@ run offline and deterministically.
 ./tests/run.sh
 ```
 
-- `tests/smoke.js` — background service worker: message routing, polling,
-  command execution, update detection (51 assertions)
+- `tests/smoke.js` — background worker: routing, polling, commands, update
+  detection, and plain-language instructions (56 assertions)
 - `tests/popup.test.js` — popup rendering across 10 scenarios (28 assertions)
 - `tests/options.test.js` — settings save/link behaviour (19 assertions)
+- `tests/skill.test.js` — skill engine, resume, and intent routing (78 assertions)
 - `tests/update-check.live.js` — manual, hits the real GitHub API (needs network)
 
 `run.sh` also checks syntax, manifest sanity, that no file hardcodes a version,
-and warns when `chrome-extension/` differs from the tagged release.
+that `skills-bundled.js` matches `skills/bundled.json`, and warns when
+`chrome-extension/` differs from the tagged release.
 
 ## Design notes
 
@@ -138,6 +200,10 @@ Built to avoid the MV3 traps that make these extensions silently fail:
   timeout guard.
 - **All DOM work goes through `chrome.scripting`** from the background worker;
   there is no content script layer to go wrong.
+- **The skill engine never touches `chrome.*` directly** — it goes through an
+  injected adapter, which is why 78 assertions can run it without a browser.
+- **Multi-step runs are resumable**, because a 30s suspension mid-scrape would
+  otherwise look like a hang.
 
 See the `chrome-bridge-extension` skill for the full pitfall list.
 

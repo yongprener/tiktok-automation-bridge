@@ -8,13 +8,51 @@
  * kebenaran (manifest.json). Jangan hardcode versi di file ini.
  */
 
-self.importScripts('lib/telegram-bridge.js');
+self.importScripts(
+  'lib/telegram-bridge.js',
+  'lib/skill-runner.js',
+  'lib/skill-adapter.js',
+  'lib/skills-bundled.js',   // generated from skills/bundled.json — see scripts/sync-skills.py
+  'lib/intent.js'
+);
 
 const CURRENT_VERSION = chrome.runtime.getManifest().version;
 const POLL_ALARM = 'bridge-poll';
 const UPDATE_ALARM = 'bridge-update-check';
+const SKILL_ALARM = 'bridge-skill-resume';
 
 let activeTabId = null;
+
+// ─── Skill adapter (real chrome.* implementation) ─────────────────
+// SkillRunner itself never touches chrome.*, which is what makes it testable.
+// See tests/skill.test.js.
+
+const skillAdapter = createSkillAdapter({
+  getActiveTab,
+  execInPage: (tabId, func, args) => chrome.scripting.executeScript({
+    target: { tabId },
+    func,
+    args: args || []
+  }),
+  navigateToUrl,
+  captureScreenshot
+});
+
+// Bundled skills ship in the repo; custom ones live in chrome.storage.local.
+// Chrome MV3 can't fetch() a local file from a service worker, so they are
+// inlined here at build time by scripts/sync-skills.py.
+const SKILLS_FILE = 'skills/bundled.json';
+
+async function loadBundledSkills() {
+  if (typeof BUNDLED_SKILLS !== 'undefined') return BUNDLED_SKILLS;
+  return [];
+}
+
+async function initSkills() {
+  const bundled = await loadBundledSkills();
+  const custom = await SkillStore.loadCustom();
+  return SkillRunner.init(skillAdapter, bundled, custom);
+}
 
 // ─── Lightweight log ring buffer (shown in popup) ─────────────────
 
@@ -40,6 +78,18 @@ async function logEvent(msg) {
   }
 })();
 
+// If a skill run was interrupted by the service worker being suspended, pick it
+// up here — the alarm alone can be up to 30s late, and waking for any reason
+// (a poll, a popup opening) is a good moment to check.
+(async () => {
+  try {
+    const saved = await chrome.storage.local.get(['skillRun']);
+    if (saved && saved.skillRun) await resumeSkillIfPending();
+  } catch (e) {
+    console.error('[BG] Skill auto-resume check failed:', e.message);
+  }
+})();
+
 async function isPollingEnabled() {
   const { pollingEnabled } = await chrome.storage.local.get(['pollingEnabled']);
   return !!pollingEnabled;
@@ -56,6 +106,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   await TelegramBridge.init();
   chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
   chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 30 });
+  chrome.alarms.create(SKILL_ALARM, { periodInMinutes: 0.5 });
   await setPollingEnabled(false);
   if (details.reason === 'install') chrome.runtime.openOptionsPage();
 });
@@ -65,6 +116,7 @@ chrome.runtime.onStartup.addListener(async () => {
   await TelegramBridge.init();
   chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
   chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: 30 });
+  chrome.alarms.create(SKILL_ALARM, { periodInMinutes: 0.5 });
 });
 
 // ─── Alarm-driven polling ─────────────────────────────────────────
@@ -74,8 +126,39 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await pollTick();
   } else if (alarm.name === UPDATE_ALARM) {
     await checkForUpdate();
+  } else if (alarm.name === SKILL_ALARM) {
+    await resumeSkillIfPending();
   }
 });
+
+/**
+ * A skill run persists its progress after every step. If Chrome suspended the
+ * service worker mid-run, the next alarm tick picks it up from the last
+ * completed step instead of starting over (or silently dying).
+ */
+async function resumeSkillIfPending() {
+  try {
+    await initSkills();
+    const saved = await skillAdapter.loadState();
+    if (!saved || !saved.skillId) return;
+
+    await logEvent(`resume skill ${saved.skillId} @${saved.index}`);
+    await TelegramBridge.init();
+    if (TelegramBridge.isConfigured() && TelegramBridge.chatId) {
+      try {
+        await TelegramBridge.sendMessage(
+          `🔄 Lanjut skill <b>${escapeHtml(saved.skillId)}</b> dari step ${saved.index + 1}…`
+        );
+      } catch (e) { /* ignore */ }
+    }
+
+    const out = await SkillRunner.resumeIfPending();
+    if (out) await sendSkillResult({ out, skillId: saved.skillId });
+  } catch (e) {
+    console.error('[BG] Skill resume failed:', e.message);
+    await logEvent('skill resume failed: ' + e.message);
+  }
+}
 
 async function pollTick() {
   await TelegramBridge.init();
@@ -131,7 +214,28 @@ async function handleCommandMessage(message) {
     console.warn('[BG] Ack failed:', e.message);
   }
 
-  const result = await executeCommand(command);
+  // ── Route: try natural language first, then fall back to raw commands ──
+  await initSkills();
+  const intent = IntentRouter.parse(command, SkillRunner.skills);
+
+  if (intent.kind === 'skill') {
+    const result = await runSkillIntent(intent);
+    await sendSkillResult(result, intent.skillId);
+    return;
+  }
+
+  const raw = intent.kind === 'passthrough' ? intent.command : command;
+
+  // Unknown intent AND not a recognisable command -> helpful message instead
+  // of a bare "unknown command".
+  if (intent.kind === 'unknown') {
+    try {
+      await TelegramBridge.sendMessage('🤔 ' + escapeHtml(intent.reply));
+    } catch (e) { /* ignore */ }
+    return;
+  }
+
+  const result = await executeCommand(raw);
 
   try {
     if (result.success) {
@@ -148,6 +252,73 @@ async function handleCommandMessage(message) {
     }
   } catch (e) {
     console.warn('[BG] Result send failed:', e.message);
+  }
+}
+
+/**
+ * Run a skill and report progress to Telegram as steps complete.
+ * Progress messages matter here: a skill can take a minute, and silence looks
+ * like a hang (which is exactly what caused the earlier "Start does nothing"
+ * confusion).
+ */
+async function runSkillIntent(intent) {
+  try {
+    await TelegramBridge.sendMessage('▶️ ' + escapeHtml(intent.reply));
+
+    let lastReported = 0;
+    const onProgress = async (p) => {
+      // Report at most every other step to avoid flooding the chat.
+      if (p.index - lastReported < 3 && p.index !== p.total) return;
+      lastReported = p.index;
+      try {
+        await TelegramBridge.sendMessage(`… step ${p.index}/${p.total} (${escapeHtml(p.action)})`);
+      } catch (e) { /* ignore */ }
+    };
+
+    const out = await SkillRunner.run(intent.skillId, intent.params || {}, onProgress);
+    return { out, skillId: intent.skillId };
+  } catch (e) {
+    return { out: { ok: false, error: e.message, log: [], vars: {} }, skillId: intent.skillId };
+  }
+}
+
+async function sendSkillResult({ out, skillId }, _unused) {
+  try {
+    if (!out.ok) {
+      const log = (out.log || []).slice(-6).join('\n');
+      await TelegramBridge.sendMessage(
+        `❌ <b>${escapeHtml(skillId)}</b> gagal\n${escapeHtml(out.error || '')}` +
+        (log ? `\n\n<pre>${escapeHtml(log)}</pre>` : '')
+      );
+      return;
+    }
+
+    // Screenshot captured as a var -> send it as a photo.
+    const shotKey = Object.keys(out.vars || {}).find(k => {
+      const v = out.vars[k];
+      return typeof v === 'string' && v.startsWith('data:image/');
+    });
+    if (shotKey) {
+      await sendPhoto(out.vars[shotKey], `${skillId} — ${shotKey}`);
+    }
+
+    // Structured data -> JSON block.
+    const dataKeys = Object.keys(out.vars || {}).filter(k => Array.isArray(out.vars[k]) || (out.vars[k] && typeof out.vars[k] === 'object'));
+    // A `report` step wins: it is the human-readable summary.
+    const reportStep = (SkillRunner.get(skillId)?.steps || []).some(s => s.action === 'report');
+    if (reportStep) {
+      const text = out.log.slice(-1)[0] || 'Selesai';
+      await TelegramBridge.sendMessage(`✅ <b>${escapeHtml(skillId)}</b> selesai\n\n${escapeHtml(text)}`);
+    } else {
+      await TelegramBridge.sendMessage(`✅ <b>${escapeHtml(skillId)}</b> selesai`);
+    }
+
+    for (const k of dataKeys) {
+      const preview = SkillRunner.preview(out.vars[k], 2500);
+      await TelegramBridge.sendMessage(`<b>${escapeHtml(k)}</b>\n<pre>${escapeHtml(preview)}</pre>`);
+    }
+  } catch (e) {
+    console.warn('[BG] Skill result send failed:', e.message);
   }
 }
 
@@ -227,6 +398,32 @@ async function executeCommand(command) {
           data: tabs.map(t => ({ id: t.id, title: t.title, url: t.url }))
         };
       }
+      case 'skill':
+      case 'skill-list':
+      case 'skills':
+      case 'daftar-skill': {
+        await initSkills();
+        if (action === 'skill-list' || action === 'skills' || action === 'daftar-skill' || !rest) {
+          const list = SkillRunner.list();
+          return {
+            success: true,
+            message: `${list.length} skill tersedia`,
+            data: list.map(s => `${s.id} — ${s.name} (${s.steps} step)`)
+          };
+        }
+        const m = rest.match(/^run\s+(\S+)([\s\S]*)$/i);
+        if (m) {
+          const params = IntentRouter.parseParams(m[2]);
+          const run = await SkillRunner.run(m[1], params);
+          return {
+            success: run.ok,
+            message: run.ok ? 'Skill selesai' : 'Skill gagal',
+            data: run.log,
+            error: run.error
+          };
+        }
+        return { success: false, error: 'Usage: skill | skill run <id> key=value' };
+      }
       case 'status': {
         return {
           success: true,
@@ -240,15 +437,33 @@ async function executeCommand(command) {
           }
         };
       }
+      case 'waitfor':
+      case 'tunggu': {
+        if (!rest) return { success: false, error: 'Usage: waitfor <css-selector>' };
+        const ok = await skillAdapter.waitFor(rest, 20000);
+        return ok
+          ? { success: true, message: `Elemen muncul: ${rest}` }
+          : { success: false, error: `Elemen tidak muncul dalam 20s: ${rest}` };
+      }
       case 'help':
       case 'bantuan': {
         return {
           success: true,
           message: 'Perintah',
           data: [
+            '— bahasa biasa juga bisa —',
+            'buka <url>',
+            'ambil data di <url>',
+            'check analitik di <url>',
+            'baca halaman <url>',
+            'audit <url>',
+            '',
+            '— perintah teknis —',
             'navigate <url>', 'screenshot', 'scrape <selector>',
             'text', 'click <selector>', 'fill <selector>=<value>',
-            'tabs', 'status', 'help'
+            'waitfor <selector>', 'tabs', 'status',
+            'skill', 'skill run <id> key=value',
+            'help'
           ]
         };
       }
@@ -532,6 +747,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         const result = await executeCommand(message.command || '');
         sendResponse(result);
+      })();
+      return true;
+    }
+
+    case 'skill-list': {
+      (async () => {
+        await initSkills();
+        sendResponse({ success: true, skills: SkillRunner.list() });
+      })();
+      return true;
+    }
+
+    case 'skill-run': {
+      (async () => {
+        try {
+          await initSkills();
+          const out = await SkillRunner.run(message.skillId, message.params || {});
+          sendResponse({ success: out.ok, out });
+        } catch (e) {
+          sendResponse({ success: false, out: { ok: false, error: e.message, vars: {}, log: [] } });
+        }
+      })();
+      return true;
+    }
+
+    case 'skill-resume': {
+      (async () => {
+        await resumeSkillIfPending();
+        sendResponse({ success: true });
+      })();
+      return true;
+    }
+
+    case 'skill-save': {
+      (async () => {
+        const res = await SkillStore.saveCustom(message.skill);
+        if (res.ok) await initSkills();
+        sendResponse(res);
+      })();
+      return true;
+    }
+
+    case 'skill-delete': {
+      (async () => {
+        const res = await SkillStore.deleteCustom(message.skillId);
+        if (res.ok) await initSkills();
+        sendResponse(res);
+      })();
+      return true;
+    }
+
+    case 'intent-parse': {
+      // Exposed so the popup/tests can preview routing without running it.
+      (async () => {
+        await initSkills();
+        sendResponse(IntentRouter.parse(message.text || '', SkillRunner.skills));
       })();
       return true;
     }

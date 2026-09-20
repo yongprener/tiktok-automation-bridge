@@ -3,6 +3,59 @@
 Semua perubahan penting project ini.
 Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](https://semver.org/)
 
+## [0.4.0] - 2026-09-20
+
+Extension sekarang mengerti **bahasa biasa** dan bisa menjalankan **skill**
+(rangkaian langkah tersimpan) dalam satu perintah.
+
+Sebelumnya perintah harus kaku: `scrape <selector>`. Mengirim "check dan ambil
+data analitik di <url>" dijawab `❌ Perintah nggak dikenal: check`.
+
+### Added
+
+- **Intent router** — mengenali perintah bahasa Indonesia/Inggris sehari-hari
+  dan memetakannya ke skill atau perintah primitif. Deterministik, tanpa panggilan
+  model, jadi tidak ada biaya dan tidak ada latensi tambahan. Yang tidak dikenali
+  tetap diteruskan ke eksekutor lama, jadi tidak ada yang rusak.
+- **Skill system** — skill = file JSON berisi rangkaian langkah. 5 skill bawaan:
+  `scrape-tiktokshop`, `check-captcha`, `page-audit`, `scroll-and-read`,
+  `watch-element`.
+- Aksi langkah: `navigate`, `wait`, `waitFor`, `click`, `fill`, `scroll`,
+  `collect`, `assert`, `screenshot`, `report`. Nilai dari langkah sebelumnya
+  dipakai lewat `{{variabel}}`.
+- Perintah `skill` (daftar) dan `skill run <id> key=value`.
+- `waitfor <selector>` sebagai perintah primitif; `click` sekarang bisa pakai
+  `text=` selain `selector=`; `assert` bisa mendeteksi CAPTCHA.
+- Skill custom bisa disimpan runtime (`skill-save`) tanpa rilis baru.
+- Progres dikirim ke Telegram tiap beberapa langkah, jadi proses panjang tidak
+  terlihat seperti hang.
+
+### Fixed
+
+- **Skill yang terputus sekarang dilanjutkan, bukan hilang.** Chrome mematikan
+  service worker setelah ~30 detik idle, dan scraping multi-langkah melewati itu.
+  Runner menyimpan `{skillId, index, vars}` setelah **setiap** langkah dan
+  melanjutkan dari langkah terakhir yang selesai — lewat alarm, dan juga saat
+  service worker bangun karena alasan apa pun. Run yang ditinggalkan >5 menit
+  dibuang, tidak dihidupkan lagi.
+- `click` menangani elemen yang `disabled`/tertutup overlay, dan fallback ke
+  synthetic pointer event kalau `click()` biasa gagal.
+- Domain tanpa `http://` (mis. `shop.tiktok.com/produk`) sekarang dikenali.
+- Output langkah `report` masuk ke log sehingga ringkasannya sampai ke chat.
+
+### Changed
+
+- `skills/bundled.json` adalah sumber; `lib/skills-bundled.js` digenerate oleh
+  `scripts/sync-skills.py` (service worker tidak bisa `fetch()` file sendiri).
+  `tests/run.sh` gagal kalau keduanya tidak sinkron.
+
+### Tests
+
+98 → 181 assertion (background 56, popup 28, options 19, skill 78). Suite skill
+memverifikasi setiap skill bawaan benar-benar berjalan, plus resume setelah
+service worker mati — dan sudah dibuktikan GAGAL saat routing-nya dikembalikan
+ke perilaku lama.
+
 ## [0.3.0] - 2026-09-20
 
 Repo dijadikan **public**, sehingga deteksi update otomatis akhirnya bisa

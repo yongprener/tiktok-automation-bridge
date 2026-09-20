@@ -40,7 +40,8 @@ function makeChrome() {
           for (const k of arr) if (k in store) out[k] = store[k];
           return out;
         },
-        set: async (obj) => { Object.assign(store, obj); }
+        set: async (obj) => { Object.assign(store, obj); },
+        remove: async (keys) => { for (const k of (Array.isArray(keys) ? keys : [keys])) delete store[k]; }
       }
     },
     alarms: {
@@ -102,7 +103,10 @@ global.fetch = async (url, opts = {}) => {
 
 // ── Load background.js ────────────────────────────────────────────
 const bgSrc = fs.readFileSync(path.join(EXT, 'background.js'), 'utf8');
-const bridgeSrc = fs.readFileSync(path.join(EXT, 'lib', 'telegram-bridge.js'), 'utf8');
+const libSrc = {};
+for (const f of ['telegram-bridge.js', 'skill-runner.js', 'skill-adapter.js', 'skills-bundled.js', 'intent.js']) {
+  libSrc[f] = fs.readFileSync(path.join(EXT, 'lib', f), 'utf8');
+}
 
 const sandbox = {
   chrome: makeChrome(),
@@ -131,7 +135,10 @@ const sandbox = {
 sandbox.self = sandbox;
 sandbox.importScripts = (...files) => {
   for (const f of files) {
-    vm.runInContext(bridgeSrc, ctx, { filename: f });
+    const key = String(f).split('/').pop();   // background.js passes 'lib/x.js'
+    const src = libSrc[key];
+    if (!src) throw new Error('test harness missing lib file: ' + f);
+    vm.runInContext(src, ctx, { filename: f });
   }
 };
 sandbox.globalThis = sandbox;
@@ -336,6 +343,48 @@ function sendMessage(msg, timeoutMs = 3000) {
   releasesPayload = { status: 200, body: { name: '' } };
   r = await sendMessage({ type: 'check-update' });
   t('channel=manual', store.updateChannel === 'manual', store.updateChannel);
+
+  // ── The real regression: a plain-language instruction must route to a skill ──
+  // This is the exact message that failed with "Perintah nggak dikenal: check".
+  console.log('\n22) plain-language instruction routes to a skill end-to-end');
+  getUpdatesPayload = {
+    ok: true,
+    result: [{
+      update_id: 900,
+      message: {
+        message_id: 30,
+        chat: { id: 123456789 },
+        text: 'check dan ambil data analitik di https://www.tiktok.com/tiktokstudio/analytics'
+      }
+    }]
+  };
+  fetchCalls.length = 0;
+  await tick({ name: 'bridge-poll' });
+
+  const sent = fetchCalls.filter(c => c.url.includes('/sendMessage')).map(c => String(c.body));
+  t('no "nggak dikenal" error', !sent.some(b => /nggak dikenal/i.test(b)), sent.find(b => /nggak dikenal/i.test(b)) || '');
+  t('did NOT navigate blindly (it is a skill, not a raw command)', !sent.some(b => /"navigate /.test(b)));
+  t('asked to open the analytics URL', sent.some(b => /analitik/i.test(b)), JSON.stringify(sent.slice(0, 2)));
+
+  console.log('\n23) bare-domain instruction also routes (no http:// needed)');
+  getUpdatesPayload = {
+    ok: true,
+    result: [{ update_id: 901, message: { message_id: 31, chat: { id: 1 }, text: 'ambil data di shop.tiktok.com/produk' } }]
+  };
+  fetchCalls.length = 0;
+  await tick({ name: 'bridge-poll' });
+  const sent2 = fetchCalls.filter(c => c.url.includes('/sendMessage')).map(c => String(c.body));
+  t('no unknown-command error', !sent2.some(b => /nggak dikenal/i.test(b)));
+
+  console.log('\n24) a genuinely unknown instruction gets a helpful reply, not silence');
+  getUpdatesPayload = {
+    ok: true,
+    result: [{ update_id: 902, message: { message_id: 32, chat: { id: 1 }, text: 'apa kabar bot' } }]
+  };
+  fetchCalls.length = 0;
+  await tick({ name: 'bridge-poll' });
+  const sent3 = fetchCalls.filter(c => c.url.includes('/sendMessage')).map(c => String(c.body));
+  t('still replies', sent3.length >= 1, String(sent3.length));
 
   console.log(`\n═══ ${pass} passed, ${fail} failed ═══`);
   process.exit(fail ? 1 : 0);

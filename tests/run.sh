@@ -32,6 +32,13 @@ for f in ('chrome-extension/background.js', 'chrome-extension/popup.js'):
     assert not hard, f'{f} still hardcodes a version literal'
 print(f"  ok  version derived from manifest in both files")
 
+# chrome-extension/lib/skills-bundled.js is generated. If it drifts from
+# skills/bundled.json the extension ships stale skills, silently.
+import subprocess as _sp
+_r = _sp.run(['python3', 'scripts/sync-skills.py', '--check'], capture_output=True, text=True)
+print('  ' + ('ok  ' if _r.returncode == 0 else '!!  ') + _r.stdout.strip().lstrip())
+assert _r.returncode == 0, 'skills-bundled.js out of sync — run python3 scripts/sync-skills.py' 
+
 # Fire the "forgot to bump the version" tripwire. Only meaningful when the
 # EXTENSION SOURCE differs from the tagged release — a docs/test-only commit
 # must not trip it, otherwise the warning becomes noise nobody reads.
@@ -65,6 +72,10 @@ node tests/popup.test.js
 echo
 echo "── options behavior ──────────────────────"
 node tests/options.test.js
+
+echo
+echo "── skill system + intent router ──────────"
+node tests/skill.test.js
 
 echo
 echo "✅ ALL SUITES PASSED"
