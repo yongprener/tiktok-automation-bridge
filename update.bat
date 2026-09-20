@@ -4,46 +4,43 @@ REM TikTok Automation Bridge — Auto Update (Windows)
 REM ==========================================
 REM Just double-click this file.
 
-set REPO=yongprener/tiktok-automation-bridge
-set BRANCH=main
-set SCRIPT_DIR=%~dp0
-set TMP_DIR=%TEMP%\tiktab-update
-set ZIP_FILE=%TMP_DIR%\tiktab-latest.zip
-set EXTRACT_DIR=%TMP_DIR%\extracted
+set "SCRIPT_DIR=%~dp0"
+set "TMP_DIR=%TEMP%\tiktab-update"
 
 echo ==========================================
 echo   TikTok Automation Bridge - Update
 echo ==========================================
 echo.
 
-REM Check for curl or powershell
-where curl >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference = 'Stop';" ^
+  "$url = 'https://github.com/yongprener/tiktok-automation-bridge/archive/refs/heads/main.zip';" ^
+  "$tmp = '%TMP_DIR%';" ^
+  "$zip = Join-Path $tmp 'tiktab-latest.zip';" ^
+  "$extract = Join-Path $tmp 'extracted';" ^
+  "Write-Host 'Downloading...';" ^
+  "New-Item -ItemType Directory -Force -Path $tmp | Out-Null;" ^
+  "Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing;" ^
+  "Write-Host 'Extracting...';" ^
+  "if (Test-Path $extract) { Remove-Item -Recurse -Force $extract };" ^
+  "Expand-Archive -Path $zip -DestinationPath $extract -Force;" ^
+  "$src = Get-ChildItem -Directory $extract | Select-Object -First 1;" ^
+  "$extSrc = Join-Path $src.FullName 'chrome-extension';" ^
+  "if (-not (Test-Path $extSrc)) { Write-Host 'ERROR: chrome-extension not found'; exit 1 };" ^
+  "$dest = '%SCRIPT_DIR%chrome-extension';" ^
+  "Write-Host 'Copying files...';" ^
+  "Copy-Item -Path (Join-Path $extSrc '*') -Destination $dest -Recurse -Force;" ^
+  "Remove-Item -Recurse -Force $tmp;" ^
+  "Write-Host 'Done!'"
+
 if %ERRORLEVEL% neq 0 (
-  echo curl not found. Using PowerShell...
-  powershell -Command "Invoke-WebRequest -Uri 'https://github.com/%REPO%/archive/refs/heads/%BRANCH%.zip' -OutFile '%ZIP_FILE%'"
-) else (
-  echo Downloading latest version...
-  mkdir "%TMP_DIR%" 2>nul
-  curl -sL "https://github.com/%REPO%/archive/refs/heads/%BRANCH%.zip" -o "%ZIP_FILE%"
-)
-
-echo Extracting...
-powershell -Command "Expand-Archive -Path '%ZIP_FILE%' -DestinationPath '%EXTRACT_DIR%' -Force"
-
-REM Find extracted folder
-for /d %%D in ("%EXTRACT_DIR%\*") do set EXTRACTED_FOLDER=%%D
-
-if not exist "%EXTRACTED_FOLDER%\chrome-extension" (
-  echo ERROR: Could not find chrome-extension folder.
+  echo.
+  echo Update failed. Try manually:
+  echo 1. Download from https://github.com/yongprener/tiktok-automation-bridge/archive/refs/heads/main.zip
+  echo 2. Extract and copy chrome-extension folder
   pause
   exit /b 1
 )
-
-echo Updating files...
-xcopy /E /Y /I "%EXTRACTED_FOLDER%\chrome-extension" "%SCRIPT_DIR%\chrome-extension"
-
-REM Clean up
-rmdir /S /Q "%TMP_DIR%" 2>nul
 
 echo.
 echo ==========================================
