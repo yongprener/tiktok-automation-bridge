@@ -31,7 +31,27 @@ for f in ('chrome-extension/background.js', 'chrome-extension/popup.js'):
     hard = re.findall(r"(?:CURRENT_VERSION|EXPECTED_VERSION)\s*=\s*'", src)
     assert not hard, f'{f} still hardcodes a version literal'
 print(f"  ok  version derived from manifest in both files")
-print(f"  ok  git tag should match: v{m['version']}")
+
+# Fire the "forgot to bump the version" tripwire. Only meaningful when the
+# EXTENSION SOURCE differs from the tagged release — a docs/test-only commit
+# must not trip it, otherwise the warning becomes noise nobody reads.
+import subprocess, os
+ver = m['version']
+if os.path.isdir('.git'):
+    has_tag = subprocess.run(['git','rev-parse','--verify','-q',f'v{ver}'],
+                             capture_output=True, text=True).returncode == 0
+    if not has_tag:
+        print(f"  ok  v{ver} not tagged yet (expected pre-release)")
+    else:
+        diff = subprocess.run(['git','diff','--quiet',f'v{ver}','--','chrome-extension/'],
+                              capture_output=True)
+        if diff.returncode == 0:
+            print(f"  ok  extension source matches tag v{ver}")
+        else:
+            print(f"  !!  chrome-extension/ has changes not in tag v{ver}")
+            print(f"  !!  run ./scripts/release.sh patch to cut a release")
+else:
+    print(f"  ok  not a git checkout, tag check skipped")
 PY
 
 echo
