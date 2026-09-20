@@ -58,7 +58,7 @@ async function saveConfig() {
   }
 
   const stored = await chrome.storage.local.get([
-    'deviceId', 'chatId', 'lastUpdateId'
+    'deviceId', 'chatId', 'lastUpdateId', 'botToken'
   ]);
 
   const updates = { deviceName, botToken };
@@ -66,8 +66,10 @@ async function saveConfig() {
   if (!stored.deviceId) {
     updates.deviceId = 'dev_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
   }
-  // PRESERVE chatId if the token is unchanged — don't force re-link
-  if (stored.botToken !== botToken) {
+  // PRESERVE chatId if the token is unchanged — don't force re-link.
+  // NOTE: 'botToken' MUST be in the get() key list above, otherwise stored.botToken
+  // is always undefined and this branch wipes chatId on every save.
+  if (stored.botToken && stored.botToken !== botToken) {
     updates.chatId = '';
     updates.lastUpdateId = 0;
   }
