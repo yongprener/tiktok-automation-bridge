@@ -7,29 +7,41 @@ self.importScripts('lib/telegram-bridge.js');
 
 const CURRENT_VERSION = '0.1.0';
 const REPO_API = 'https://api.github.com/repos/yongprener/tiktok-automation-bridge/releases/latest';
-const REPO_DOWNLOAD = 'https://github.com/yongprener/tiktok-automation-bridge/archive/refs/heads/main.zip';
 
 let activeTabId = null;
+
+// ─── Initialize on load (service worker start) ────────────────────
+
+// Run immediately — service worker wakes up on messages, not just onInstalled
+initBackground();
+
+async function initBackground() {
+  try {
+    await TelegramBridge.init();
+    console.log('[BG] Bridge initialized. Configured:', TelegramBridge.isConfigured());
+    
+    // Set up alarms
+    chrome.alarms.create('poll', { periodInMinutes: 0.5 });
+    chrome.alarms.create('update-check', { periodInMinutes: 30 });
+  } catch (e) {
+    console.error('[BG] Init error:', e);
+  }
+}
 
 // ─── Lifecycle ────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log('[BG] Installed/updated:', details.reason);
   await TelegramBridge.init();
-
+  
   if (details.reason === 'install') {
     chrome.runtime.openOptionsPage();
   }
-
-  chrome.alarms.create('poll', { periodInMinutes: 0.5 });
-  chrome.alarms.create('update-check', { periodInMinutes: 30 });
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   console.log('[BG] Browser started');
   await TelegramBridge.init();
-  chrome.alarms.create('poll', { periodInMinutes: 0.5 });
-  chrome.alarms.create('update-check', { periodInMinutes: 30 });
 });
 
 // ─── Alarm Handler ────────────────────────────────────────────────
@@ -37,6 +49,7 @@ chrome.runtime.onStartup.addListener(async () => {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'poll') {
     if (TelegramBridge.isConfigured() && !TelegramBridge.polling) {
+      console.log('[BG] Auto-starting polling from alarm...');
       await TelegramBridge.startPolling();
     }
   } else if (alarm.name === 'update-check') {
@@ -50,25 +63,18 @@ async function checkForUpdate() {
   try {
     const response = await fetch(REPO_API);
     if (!response.ok) return;
-
     const data = await response.json();
     const latestVersion = (data.tag_name || '').replace(/^v/, '');
 
-    if (isNewerVersion(latestVersion, CURRENT_VERSION)) {
-      // Show desktop notification
+    if (latestVersion && isNewerVersion(latestVersion, CURRENT_VERSION)) {
       chrome.notifications.create('update-available', {
         type: 'basic',
         iconUrl: 'icons/icon128.png',
         title: 'Update Available',
-        message: `v${latestVersion} is ready. Run update.sh (Mac/Linux) or update.bat (Windows).`,
+        message: `v${latestVersion} is ready. Run update.bat to update.`,
         priority: 2
       });
-
-      // Also store for popup
-      await chrome.storage.local.set({
-        updateAvailable: true,
-        updateVersion: latestVersion
-      });
+      await chrome.storage.local.set({ updateAvailable: true, updateVersion: latestVersion });
     }
   } catch (e) {
     console.log('[BG] Update check failed:', e.message);
@@ -101,14 +107,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'config-update') {
-    TelegramBridge.saveConfig(message.config).then(() => {
+    TelegramBridge.saveConfig(message.config).then(async () => {
+      await TelegramBridge.init();
       sendResponse({ success: true });
     });
     return true;
   }
 
   if (message.type === 'start-polling') {
-    TelegramBridge.startPolling().then(() => {
+    // Re-init in case config changed
+    TelegramBridge.init().then(() => {
+      return TelegramBridge.startPolling();
+    }).then(() => {
       sendResponse({ success: true });
     }).catch((e) => {
       sendResponse({ success: false, error: e.message });
