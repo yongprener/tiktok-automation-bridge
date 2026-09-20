@@ -3,6 +3,50 @@
 Semua perubahan penting project ini.
 Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](https://semver.org/)
 
+## [0.3.0] - 2026-09-20
+
+Repo dijadikan **public**, sehingga deteksi update otomatis akhirnya bisa
+berfungsi. Sebelumnya tombol update adalah kode mati: GitHub menutup Releases
+API untuk repo private (HTTP 404), jadi extension tidak akan pernah tahu ada
+versi baru.
+
+### Added
+
+- **Deteksi update otomatis via GitHub Releases API.** Extension mengecek tiap
+  30 menit lewat `chrome.alarms`, dan menampilkan notifikasi desktop kalau ada
+  versi lebih baru.
+- Fallback ke feed publik (`UPDATE_FEED_URL`, mis. `version.json`) untuk berjaga
+  kalau repo suatu saat di-private lagi.
+- `tests/update-check.live.js` — cek langsung ke GitHub API yang asli
+  (dijalankan manual, butuh jaringan).
+- `LICENSE` — file MIT yang selama ini sudah diklaim di README tapi belum ada.
+- `scripts/release.sh` sekarang **mempublikasikan GitHub Release**, bukan cuma
+  push tag. Tanpa Release, extension tidak melihat versi baru.
+
+### Fixed
+
+- `update.sh` dan `update.bat` kini menjelaskan penyebab gagal (git belum
+  terinstall, folder bukan hasil clone, ada perubahan lokal yang bentrok) dan
+  menampilkan versi hasil update.
+- `update.bat` menampilkan versi dengan aman walau `python` tidak terpasang.
+
+### Security
+
+- Fixture tes dibersihkan: ID Telegram, device ID, nama device, dan username
+  bot yang asli diganti placeholder netral — supaya tidak ikut terpublikasi.
+  Seluruh history git sudah discan: tidak ada token, PAT, atau private key
+  yang pernah ter-commit, jadi tidak perlu rewrite history.
+- `.gitignore` mencakup `*.env`, `*.log`, `*.pem`, `*.zip`, `*.crx`.
+
+### Changed
+
+- `checkForUpdate()` dipecah: `fetchLatestVersion()` mencoba Releases API dulu,
+  lalu feed publik. Kalau dua-duanya tidak tersedia, channel dilaporkan
+  `manual` supaya popup menampilkan "jalankan update.bat" alih-alih tombol yang
+  tidak pernah aktif.
+- Suite tes naik dari 83 ke 98 assertion (update-detection kini teruji:
+  versi lebih baru, sama, lebih lama, 404, network error, payload kosong).
+
 ## [0.2.1] - 2026-09-20
 
 Perbaikan besar: tombol Start yang diam-diam gagal, dan status popup yang tidak

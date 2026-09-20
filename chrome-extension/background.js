@@ -341,68 +341,84 @@ async function fillInput(selector, value) {
 
 // ─── Auto-update check ────────────────────────────────────────────
 //
-// The repo is PRIVATE, so api.github.com/repos/.../releases/latest answers 404
-// to an unauthenticated extension. We therefore check git TAGS on the public
-// git protocol endpoint, which works for private repos only if... it doesn't.
-// So: primary source is `version.json` published on a public channel (raw
-// gist / GitHub Pages) if one is ever configured; otherwise we fall back to
-// the git ls-remote style endpoint and simply report "unknown".
-//
-// Practical consequence, stated plainly: with a private repo and no release
-// feed, the extension CANNOT discover new versions on its own. The user runs
-// update.bat / update.sh instead, and the popup explains that. We keep this
-// function so the wiring is ready the moment a public update feed exists.
+// The repo is PUBLIC, so the unauthenticated GitHub Releases API works.
+// Two sources, tried in order:
+//   1. GitHub Releases API  (works now that the repo is public)
+//   2. UPDATE_FEED_URL      (optional public version.json — survives even if
+//                            the repo ever goes private again)
+// If both are unavailable we report channel='manual' so the popup can point
+// the user at update.bat instead of showing a button that never fires.
 
-const UPDATE_FEED_URL = ''; // e.g. a raw version.json URL; empty = disabled
+const REPO_API = 'https://api.github.com/repos/yongprener/tiktok-automation-bridge/releases/latest';
+const UPDATE_FEED_URL = ''; // optional: raw version.json URL
+
+async function fetchLatestVersion() {
+  // 1) GitHub Releases API
+  try {
+    const res = await fetch(REPO_API, {
+      headers: { Accept: 'application/vnd.github+json' },
+      cache: 'no-store'
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const v = String(data.tag_name || data.name || '').replace(/^v/, '').trim();
+      if (v) return { version: v, source: 'releases' };
+    }
+  } catch (e) {
+    console.log('[BG] Releases API unavailable:', e.message);
+  }
+
+  // 2) Optional public feed
+  if (UPDATE_FEED_URL) {
+    try {
+      const res = await fetch(UPDATE_FEED_URL, { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        const v = String(data.version || data.tag_name || '').replace(/^v/, '').trim();
+        if (v) return { version: v, source: 'feed' };
+      }
+    } catch (e) {
+      console.log('[BG] Update feed unavailable:', e.message);
+    }
+  }
+
+  return null;
+}
 
 async function checkForUpdate() {
-  if (!UPDATE_FEED_URL) {
-    // No public feed configured — make the UI honest instead of silently idle.
-    const stored = await chrome.storage.local.get(['lastUpdateCheck']);
+  const found = await fetchLatestVersion();
+
+  if (!found) {
+    // Cannot determine — be honest, point at the updater script.
     await chrome.storage.local.set({
       lastUpdateCheck: Date.now(),
       updateAvailable: false,
       updateVersion: '',
-      updateChannel: 'manual'   // tells the popup to show "run update.bat"
+      updateChannel: 'manual'
     });
-    void stored;
     return { channel: 'manual' };
   }
 
-  try {
-    const res = await fetch(UPDATE_FEED_URL, { cache: 'no-store' });
-    if (!res.ok) return { channel: 'manual', error: 'feed HTTP ' + res.status };
-    const data = await res.json();
-    const latest = String(data.version || data.tag_name || '').replace(/^v/, '');
+  const newer = isNewerVersion(found.version, CURRENT_VERSION);
 
-    if (latest && isNewerVersion(latest, CURRENT_VERSION)) {
-      await chrome.storage.local.set({
-        updateAvailable: true,
-        updateVersion: latest,
-        updateChannel: 'feed',
-        lastUpdateCheck: Date.now()
-      });
-      chrome.notifications.create('update-available', {
-        type: 'basic',
-        iconUrl: 'icons/icon128.png',
-        title: 'Update Tersedia',
-        message: `v${latest} siap. Jalankan update.bat / update.sh lalu reload extension.`,
-        priority: 2
-      });
-      return { channel: 'feed', updateAvailable: true, version: latest };
-    }
+  await chrome.storage.local.set({
+    lastUpdateCheck: Date.now(),
+    updateAvailable: newer,
+    updateVersion: newer ? found.version : '',
+    updateChannel: 'feed'
+  });
 
-    await chrome.storage.local.set({
-      updateAvailable: false,
-      updateVersion: '',
-      updateChannel: 'feed',
-      lastUpdateCheck: Date.now()
+  if (newer) {
+    chrome.notifications.create('update-available', {
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'Update Tersedia',
+      message: `v${found.version} siap (kamu di v${CURRENT_VERSION}). Jalankan update.bat / update.sh lalu reload extension.`,
+      priority: 2
     });
-    return { channel: 'feed', updateAvailable: false };
-  } catch (e) {
-    console.log('[BG] Update check skipped:', e.message);
-    return { channel: 'manual', error: e.message };
   }
+
+  return { channel: 'feed', updateAvailable: newer, version: found.version, source: found.source };
 }
 
 function isNewerVersion(latest, current) {

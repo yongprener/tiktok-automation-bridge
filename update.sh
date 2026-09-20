@@ -4,8 +4,8 @@
 # ==========================================
 # Just double-click or run: ./update.sh
 #
-# Uses `git pull` — the repo is PRIVATE, so downloading the archive zip
-# (github.com/.../archive/refs/heads/main.zip) returns 404. git handles auth.
+# Uses `git pull` — smaller than re-downloading the archive zip, and shows
+# you the diff. The repo is public, so either would work now.
 
 set -e
 

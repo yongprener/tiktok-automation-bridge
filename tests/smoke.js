@@ -72,9 +72,22 @@ function makeChrome() {
 
 // ── Fake fetch that records Telegram calls ────────────────────────
 let getUpdatesPayload = { ok: true, result: [] };
+
+// Controls the mocked GitHub Releases API response. Default: 404, which is what
+// a repo with no releases returns.
+let releasesPayload = { status: 404, body: {} };
+
 global.fetch = async (url, opts = {}) => {
   fetchCalls.push({ url: String(url), body: opts.body });
   const u = String(url);
+  if (u.includes('api.github.com')) {
+    if (releasesPayload.throw) throw new Error(releasesPayload.throw);
+    return {
+      ok: releasesPayload.status >= 200 && releasesPayload.status < 300,
+      status: releasesPayload.status,
+      json: async () => releasesPayload.body
+    };
+  }
   if (u.includes('/getUpdates')) {
     return { ok: true, json: async () => getUpdatesPayload };
   }
@@ -83,9 +96,6 @@ global.fetch = async (url, opts = {}) => {
   }
   if (u.includes('/getMe')) {
     return { ok: true, json: async () => ({ ok: true, result: { username: 'test_bot' } }) };
-  }
-  if (u.includes('api.github.com')) {
-    return { ok: false, status: 404, json: async () => ({}) };
   }
   return { ok: true, json: async () => ({ ok: true, result: {} }) };
 };
@@ -279,6 +289,53 @@ function sendMessage(msg, timeoutMs = 3000) {
   r = await sendMessage({ type: 'status-check' });
   t('updateChannel present', r && r.updateChannel === 'manual', r && String(r.updateChannel));
   t('version is manifest version', r && r.version === MANIFEST_VERSION, r && r.version);
+
+  // ── Update-detection: driven by a mocked GitHub Releases API ──
+  // These are the paths that matter now that the repo is public. Network is
+  // stubbed so the suite stays deterministic and offline-capable.
+  const NOTIFS = [];
+  sandbox.chrome.notifications = { create: (id, opts) => NOTIFS.push({ id, opts }) };
+
+  console.log('\n16) releases API newer than us -> update offered + notified');
+  NOTIFS.length = 0;
+  releasesPayload = { status: 200, body: { tag_name: 'v99.0.0' } };
+  r = await sendMessage({ type: 'check-update' });
+  t('updateAvailable=true', store.updateAvailable === true, String(store.updateAvailable));
+  t('updateVersion=99.0.0', store.updateVersion === '99.0.0', store.updateVersion);
+  t('channel=feed', store.updateChannel === 'feed', store.updateChannel);
+  t('notification fired', NOTIFS.some(n => n.id === 'update-available'), JSON.stringify(NOTIFS.map(n => n.id)));
+  t('response carries the version', r && r.updateVersion === '99.0.0', r && JSON.stringify(r));
+
+  console.log('\n17) releases API same version -> no update, no notification');
+  NOTIFS.length = 0;
+  releasesPayload = { status: 200, body: { tag_name: 'v' + MANIFEST_VERSION } };
+  r = await sendMessage({ type: 'check-update' });
+  t('updateAvailable=false', store.updateAvailable === false, String(store.updateAvailable));
+  t('updateVersion cleared', store.updateVersion === '', JSON.stringify(store.updateVersion));
+  t('still channel=feed (we DID reach the API)', store.updateChannel === 'feed', store.updateChannel);
+  t('no notification', NOTIFS.length === 0, JSON.stringify(NOTIFS.map(n => n.id)));
+
+  console.log('\n18) releases API older than us -> no update (no downgrade prompt)');
+  releasesPayload = { status: 200, body: { tag_name: 'v0.0.1' } };
+  r = await sendMessage({ type: 'check-update' });
+  t('updateAvailable=false', store.updateAvailable === false, String(store.updateAvailable));
+
+  console.log('\n19) releases API 404 -> falls back to manual channel');
+  releasesPayload = { status: 404, body: {} };
+  r = await sendMessage({ type: 'check-update' });
+  t('channel=manual', store.updateChannel === 'manual', store.updateChannel);
+  t('updateAvailable=false', store.updateAvailable === false);
+
+  console.log('\n20) network throw -> manual channel, no crash');
+  releasesPayload = { throw: 'network down' };
+  r = await sendMessage({ type: 'check-update' });
+  t('channel=manual', store.updateChannel === 'manual', store.updateChannel);
+  t('no crash', !!r);
+
+  console.log('\n21) releases payload without a version -> manual channel');
+  releasesPayload = { status: 200, body: { name: '' } };
+  r = await sendMessage({ type: 'check-update' });
+  t('channel=manual', store.updateChannel === 'manual', store.updateChannel);
 
   console.log(`\n═══ ${pass} passed, ${fail} failed ═══`);
   process.exit(fail ? 1 : 0);
