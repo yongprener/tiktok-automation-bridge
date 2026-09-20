@@ -20,7 +20,7 @@ const store = {
   botToken: '123:FAKE',
   deviceName: 'test-device',
   deviceId: 'dev_test1',
-  chatId: '7750244035',
+  chatId: '123456789',
   lastUpdateId: 0,
   pollingEnabled: false
 };
@@ -165,7 +165,7 @@ function sendMessage(msg, timeoutMs = 3000) {
   t('returns object', !!r);
   t('configured=true', r && r.configured === true, JSON.stringify(r));
   t('version matches manifest', r && r.version === MANIFEST_VERSION, r && r.version + ' vs ' + MANIFEST_VERSION);
-  t('chatId preserved', r && r.chatId === '7750244035', r && r.chatId);
+  t('chatId preserved', r && r.chatId === '123456789', r && r.chatId);
 
   console.log('\n1b) status-check reads FRESH storage (not stale in-memory values)');
   store.deviceName = 'renamed-device';
@@ -174,7 +174,7 @@ function sendMessage(msg, timeoutMs = 3000) {
   t('reflects new deviceName', r && r.deviceName === 'renamed-device', r && r.deviceName);
   t('reflects new chatId', r && r.chatId === '12345', r && r.chatId);
   store.deviceName = 'test-device';
-  store.chatId = '7750244035';
+  store.chatId = '123456789';
 
   console.log('\n2) start-polling responds (was: silent hang)');
   r = await sendMessage({ type: 'start-polling' });
@@ -217,7 +217,7 @@ function sendMessage(msg, timeoutMs = 3000) {
     ok: true,
     result: [{
       update_id: 555,
-      message: { message_id: 9, chat: { id: 7750244035 }, text: 'status' }
+      message: { message_id: 9, chat: { id: 123456789 }, text: 'status' }
     }]
   };
   fetchCalls.length = 0;

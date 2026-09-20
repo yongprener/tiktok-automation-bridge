@@ -76,29 +76,29 @@ async function boot() {
 (async () => {
   console.log('\nA) Existing install: save with UNCHANGED token must NOT wipe chatId');
   storageData = {
-    botToken: '123:FAKE', deviceName: 'len-yongprener21',
-    deviceId: 'dev_mu9ex4mh56fbuk', chatId: '7750244035', lastUpdateId: 555
+    botToken: '123:FAKE', deviceName: 'laptop-lenovo',
+    deviceId: 'dev_test0001', chatId: '123456789', lastUpdateId: 555
   };
   await boot();
-  t('form prefilled deviceName', els.deviceName.value === 'len-yongprener21', els.deviceName.value);
+  t('form prefilled deviceName', els.deviceName.value === 'laptop-lenovo', els.deviceName.value);
   t('form prefilled botToken', els.botToken.value === '123:FAKE');
-  t('chatId displayed', els.chatId.textContent === '7750244035', els.chatId.textContent);
+  t('chatId displayed', els.chatId.textContent === '123456789', els.chatId.textContent);
   t('status Configured', els.status.textContent === 'Configured', els.status.textContent);
 
   // simulate the user clicking Save without changing anything
-  els.deviceName.value = 'len-yongprener21';
+  els.deviceName.value = 'laptop-lenovo';
   els.botToken.value = '123:FAKE';
   await handlers['btnSave:click']();
   await new Promise(r => setTimeout(r, 40));
 
-  t('chatId PRESERVED after save', storageData.chatId === '7750244035', String(storageData.chatId));
+  t('chatId PRESERVED after save', storageData.chatId === '123456789', String(storageData.chatId));
   t('lastUpdateId PRESERVED', storageData.lastUpdateId === 555, String(storageData.lastUpdateId));
-  t('deviceId unchanged', storageData.deviceId === 'dev_mu9ex4mh56fbuk', storageData.deviceId);
+  t('deviceId unchanged', storageData.deviceId === 'dev_test0001', storageData.deviceId);
   t('success message shown', els.result.innerHTML.indexOf('Tersimpan') !== -1, els.result.innerHTML);
 
   console.log('\nB) Real token change DOES reset chat link');
   els.botToken.value = '999:NEWTOKEN';
-  els.deviceName.value = 'len-yongprener21';
+  els.deviceName.value = 'laptop-lenovo';
   await handlers['btnSave:click']();
   await new Promise(r => setTimeout(r, 40));
   t('chatId cleared', storageData.chatId === '', JSON.stringify(storageData.chatId));
@@ -120,16 +120,16 @@ async function boot() {
   await boot();
   els.botToken.value = '123:FAKE';
   fetchHandler = async (url) => {
-    if (url.includes('/getMe')) return { ok: true, json: async () => ({ ok: true, result: { username: 'bridge_browser_bot' } }) };
+    if (url.includes('/getMe')) return { ok: true, json: async () => ({ ok: true, result: { username: 'test_bridge_bot' } }) };
     if (url.includes('/deleteWebhook')) return { ok: true, json: async () => ({ ok: true, result: true }) };
-    if (url.includes('/getUpdates')) return { ok: true, json: async () => ({ ok: true, result: [{ update_id: 777, message: { chat: { id: 7750244035 } } }] }) };
+    if (url.includes('/getUpdates')) return { ok: true, json: async () => ({ ok: true, result: [{ update_id: 777, message: { chat: { id: 123456789 } } }] }) };
     return { ok: true, json: async () => ({ ok: true }) };
   };
   await handlers['btnTest:click']();
   await new Promise(r => setTimeout(r, 60));
-  t('chatId stored', String(storageData.chatId) === '7750244035', String(storageData.chatId));
+  t('chatId stored', String(storageData.chatId) === '123456789', String(storageData.chatId));
   t('lastUpdateId stored', storageData.lastUpdateId === 777, String(storageData.lastUpdateId));
-  t('mentions bot username', els.result.innerHTML.indexOf('bridge_browser_bot') !== -1, els.result.innerHTML);
+  t('mentions bot username', els.result.innerHTML.indexOf('test_bridge_bot') !== -1, els.result.innerHTML);
 
   console.log('\nE) Invalid token surfaces the API error');
   storageData = { botToken: 'bad', deviceName: 'd' };

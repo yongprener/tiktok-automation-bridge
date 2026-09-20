@@ -3,7 +3,7 @@
  * Popup smoke test.
  *
  * Reproduces the EXACT reported bug:
- *   options.html says "Configured / Chat ID: 7750244035"
+ *   options.html says "Configured / Chat ID: 123456789"
  *   popup says "Not configured / Not linked"
  * because the old service worker answers status-check with stale values.
  *
@@ -125,15 +125,15 @@ async function boot() {
 (async () => {
   console.log('\nA) THE REPORTED BUG: storage is configured, SW is stale (configured:false)');
   storageData = {
-    botToken: '123:FAKE', deviceName: 'len-yongprener21',
-    deviceId: 'dev_mu9ex4mh56fbuk', chatId: '7750244035',
+    botToken: '123:FAKE', deviceName: 'laptop-lenovo',
+    deviceId: 'dev_test0001', chatId: '123456789',
     pollingEnabled: false
   };
   swResponse = { version: STALE_VERSION, configured: false, deviceName: '', chatId: '', polling: false };
   identityEmail = '';
   await boot();
 
-  t('device shown from storage', els.device.textContent === 'len-yongprener21', els.device.textContent);
+  t('device shown from storage', els.device.textContent === 'laptop-lenovo', els.device.textContent);
   t('NOT "Not configured"', els.status.innerHTML.indexOf('Not configured') === -1, els.status.innerHTML);
   t('button says Start', els.btnToggle.textContent === 'Start', els.btnToggle.textContent);
   t('button mode=start', els.btnToggle.dataset.mode === 'start', els.btnToggle.dataset.mode);
