@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "TikTok Automation Bridge",
   "version": "0.1.0",
-  "description": "Bridge between Hermes Agent and Chrome — remote control via Telegram for video generation, TikTok scheduling, and web scraping.",
+  "description": "Bridge between Hermes Agent and Chrome \u2014 remote control via Telegram for video generation, TikTok scheduling, and web scraping.",
   "author": "yongprener",
   "permissions": [
     "tabs",
@@ -19,13 +19,16 @@
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

@@ -1,38 +1,29 @@
 /**
  * Background Service Worker
- * 
- * Main orchestrator for the extension.
- * - Initializes Telegram bridge
- * - Polls for commands
- * - Dispatches commands to content scripts
- * - Manages tab lifecycle
- * - Handles alarms for polling schedule
+ * Main orchestrator: init bridge, poll commands, dispatch to content scripts.
  */
 
-import { TelegramBridge } from './lib/telegram-bridge.js';
+// Import bridge as a script (not ES module — more compatible)
+self.importScripts('lib/telegram-bridge.js');
 
-const bridge = new TelegramBridge();
 let activeTabId = null;
 
 // ─── Lifecycle ────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(async (details) => {
-  console.log('[BG] Extension installed/updated:', details.reason);
-  
-  await bridge.init();
+  console.log('[BG] Installed/updated:', details.reason);
+  await TelegramBridge.init();
   
   if (details.reason === 'install') {
-    // First install — open options page
     chrome.runtime.openOptionsPage();
   }
   
-  // Set up polling alarm (every 1 second check)
   chrome.alarms.create('poll', { periodInMinutes: 0.5 });
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   console.log('[BG] Browser started');
-  await bridge.init();
+  await TelegramBridge.init();
   chrome.alarms.create('poll', { periodInMinutes: 0.5 });
 });
 
@@ -40,13 +31,8 @@ chrome.runtime.onStartup.addListener(async () => {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'poll') {
-    if (bridge.isConfigured() && !bridge.polling) {
-      await bridge.startPolling();
-    }
-  } else if (alarm.name === 'heartbeat') {
-    // Send heartbeat every 5 minutes
-    if (bridge.isConfigured()) {
-      await bridge.sendMessage(`💓 Heartbeat: ${bridge.deviceName} alive`);
+    if (TelegramBridge.isConfigured() && !TelegramBridge.polling) {
+      await TelegramBridge.startPolling();
     }
   }
 });
@@ -54,48 +40,57 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 // ─── Message Router ───────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'bridge-command') {
-    handleCommand(message.command, sender, sendResponse);
-    return true; // async response
-  }
-  
+  // Status check — always respond synchronously
   if (message.type === 'status-check') {
     sendResponse({
-      configured: bridge.isConfigured(),
-      deviceName: bridge.deviceName,
-      deviceId: bridge.deviceId,
-      polling: bridge.polling
+      configured: TelegramBridge.isConfigured(),
+      deviceName: TelegramBridge.deviceName,
+      deviceId: TelegramBridge.deviceId,
+      polling: TelegramBridge.polling
     });
     return false;
   }
   
+  // Config update
   if (message.type === 'config-update') {
-    bridge.saveConfig(message.config).then(() => {
+    TelegramBridge.saveConfig(message.config).then(() => {
       sendResponse({ success: true });
     });
     return true;
   }
   
+  // Start polling
   if (message.type === 'start-polling') {
-    bridge.startPolling().then(() => {
+    TelegramBridge.startPolling().then(() => {
       sendResponse({ success: true });
+    }).catch((e) => {
+      sendResponse({ success: false, error: e.message });
     });
     return true;
   }
   
+  // Stop polling
   if (message.type === 'stop-polling') {
-    bridge.stopPolling();
+    TelegramBridge.stopPolling();
     sendResponse({ success: true });
     return false;
   }
+  
+  // Bridge command
+  if (message.type === 'bridge-command') {
+    handleCommand(message.command, sender, sendResponse);
+    return true;
+  }
+  
+  return false;
 });
 
 // ─── Command Handler ──────────────────────────────────────────────
 
 async function handleCommand(command, sender, sendResponse) {
-  console.log('[BG] Command received:', command);
+  console.log('[BG] Command:', command);
   
-  const parts = command.toLowerCase().split(/\s+/);
+  const parts = (command || '').toLowerCase().split(/\s+/);
   const action = parts[0];
   
   try {
@@ -129,7 +124,6 @@ async function handleCommand(command, sender, sendResponse) {
       }
       
       case 'fill': {
-        // fill selector=value
         const match = command.match(/fill\s+(\S+)\s*=\s*(.+)/i);
         if (match) {
           await fillInput(match[1], match[2]);
@@ -140,21 +134,13 @@ async function handleCommand(command, sender, sendResponse) {
         break;
       }
       
-      case 'inject': {
-        // Execute custom JS in page
-        const code = command.replace(/^\S+\s+/, '');
-        const result = await injectScript(code);
-        sendResponse({ success: true, result });
-        break;
-      }
-      
       case 'status': {
         sendResponse({
           success: true,
           status: {
-            deviceName: bridge.deviceName,
-            deviceId: bridge.deviceId,
-            polling: bridge.polling,
+            deviceName: TelegramBridge.deviceName,
+            deviceId: TelegramBridge.deviceId,
+            polling: TelegramBridge.polling,
             activeTab: activeTabId
           }
         });
@@ -162,15 +148,18 @@ async function handleCommand(command, sender, sendResponse) {
       }
       
       default: {
-        // Forward to content script for page-specific actions
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tabs[0]) {
           activeTabId = tabs[0].id;
-          const response = await chrome.tabs.sendMessage(activeTabId, {
-            type: 'execute',
-            command
-          });
-          sendResponse(response || { success: false, error: 'No response from content script' });
+          try {
+            const response = await chrome.tabs.sendMessage(activeTabId, {
+              type: 'execute',
+              command
+            });
+            sendResponse(response || { success: false, error: 'No response from content script' });
+          } catch (e) {
+            sendResponse({ success: false, error: 'Cannot reach content script: ' + e.message });
+          }
         } else {
           sendResponse({ success: false, error: 'No active tab' });
         }
@@ -185,7 +174,6 @@ async function handleCommand(command, sender, sendResponse) {
 // ─── Tab Actions ──────────────────────────────────────────────────
 
 async function navigateToUrl(url) {
-  // Normalize URL
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     url = 'https://' + url;
   }
@@ -193,7 +181,6 @@ async function navigateToUrl(url) {
   const tab = await chrome.tabs.create({ url, active: true });
   activeTabId = tab.id;
   
-  // Wait for page load
   return new Promise((resolve) => {
     chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
       if (tabId === tab.id && info.status === 'complete') {
@@ -207,7 +194,6 @@ async function navigateToUrl(url) {
 async function captureScreenshot() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tabs[0]) throw new Error('No active tab');
-  
   return chrome.tabs.captureVisibleTab(tabs[0].windowId, { format: 'png' });
 }
 
@@ -264,16 +250,4 @@ async function fillInput(selector, value) {
     },
     args: [selector, value]
   });
-}
-
-async function injectScript(code) {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tabs[0]) throw new Error('No active tab');
-  
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: tabs[0].id },
-    func: new Function(code)
-  });
-  
-  return results[0]?.result;
 }
