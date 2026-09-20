@@ -7,7 +7,7 @@
 
 self.importScripts('lib/telegram-bridge.js');
 
-const CURRENT_VERSION = '0.2.0';
+const CURRENT_VERSION = '0.2.1';
 const REPO_API = 'https://api.github.com/repos/yongprener/tiktok-automation-bridge/releases/latest';
 const POLL_ALARM = 'bridge-poll';
 const UPDATE_ALARM = 'bridge-update-check';

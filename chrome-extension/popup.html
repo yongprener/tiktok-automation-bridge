@@ -47,6 +47,12 @@
       color: #ffb3b3; font-size: 11px; padding: 8px 10px;
       border-radius: 4px; margin-bottom: 8px; word-break: break-word;
     }
+    .warn {
+      background: #3a311a; border-left: 3px solid #ff9800;
+      color: #ffdd99; font-size: 10px; padding: 8px 10px;
+      border-radius: 4px; margin-bottom: 8px; word-break: break-word;
+      line-height: 1.4;
+    }
     .logs {
       background: #0d0d1a; color: #8f8; font-family: monospace;
       font-size: 10px; padding: 8px; border-radius: 4px;
@@ -83,6 +89,7 @@
   </div>
 
   <div class="err hidden" id="errBox"></div>
+  <div class="warn hidden" id="warnBox"></div>
 
   <button class="btn btn-primary" id="btnToggle" data-mode="start">Start</button>
   <button class="btn btn-secondary" id="btnSettings">⚙️ Settings</button>

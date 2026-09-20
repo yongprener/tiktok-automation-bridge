@@ -1,7 +1,17 @@
 /**
- * Popup Logic — v0.2.0
- * Reads config straight from storage; gets polling state from background.
+ * Popup Logic — v0.2.1
+ *
+ * PENTING: config (device, chat, polling) dibaca LANGSUNG dari chrome.storage.local.
+ * Popup TIDAK boleh bergantung pada service worker untuk kebenaran data — kalau
+ * extension belum di-reload, service worker versi lama masih hidup dan melaporkan
+ * status basi ("Not configured" padahal storage sudah terisi).
  */
+
+const EXPECTED_VERSION = '0.2.1';
+
+let currentState = null;
+let logsOpen = false;
+let busy = false;
 
 document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btnToggle').addEventListener('click', togglePolling);
@@ -11,64 +21,90 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('version').addEventListener('click', () => refresh(true));
 
   await refresh();
-  // live-ish updates while popup is open
-  setInterval(refresh, 2000);
+  setInterval(() => { refresh().catch(() => {}); }, 2000);
 });
-
-let currentState = null;
-let logsOpen = false;
-let busy = false;
 
 async function refresh(checkUpdate = false) {
   if (busy) return;
 
-  let state;
+  // ── 1. SUMBER KEBENARAN: baca storage langsung ──────────────────
+  let s = {};
   try {
-    state = await send({ type: 'status-check' });
+    s = await chrome.storage.local.get([
+      'botToken', 'deviceName', 'deviceId', 'chatId',
+      'pollingEnabled', 'lastPollOk', 'lastPollError',
+      'updateAvailable', 'updateVersion'
+    ]);
   } catch (e) {
-    state = null;
-  }
-
-  if (!state) {
-    setStatus('red', 'Service worker nggak merespons');
+    setStatus('red', 'Gagal baca storage');
     return;
   }
-  currentState = state;
 
-  document.getElementById('version').textContent = 'v' + state.version;
-  document.getElementById('device').textContent = state.deviceName || '—';
-  document.getElementById('deviceId').textContent = state.deviceId || '';
+  const configured = !!(s.botToken && s.deviceName);
+  const chatId = s.chatId ? String(s.chatId) : '';
+  const polling = !!s.pollingEnabled;
+  const deviceName = s.deviceName || '';
+  const deviceId = s.deviceId || '';
 
-  // profile / chat link
-  const profileEl = document.getElementById('profile');
+  // ── 2. Service worker: opsional — cuma buat cek versi ──────────
+  let bg = null;
   try {
-    const info = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
-    if (info.email) {
-      profileEl.textContent = info.email;
-    } else {
-      profileEl.textContent = state.chatId ? 'Chat linked' : 'Not linked';
-    }
+    bg = await chrome.runtime.sendMessage({ type: 'status-check' });
   } catch (e) {
-    profileEl.textContent = state.chatId ? 'Chat linked' : 'Not linked';
+    bg = null; // normal: SW tidur, Chrome bangunin otomatis
   }
 
-  document.getElementById('polling').textContent = state.polling ? 'Active' : 'Idle';
+  const swVersion = (bg && bg.version) ? String(bg.version) : '';
+  const staleSW = !!(swVersion && swVersion !== EXPECTED_VERSION);
+  const swAlive = !!bg;
+
+  currentState = { configured, chatId, polling, deviceName, deviceId, swVersion, staleSW };
+
+  // ── 3. Render ───────────────────────────────────────────────────
+  document.getElementById('version').textContent = 'v' + EXPECTED_VERSION;
+  document.getElementById('device').textContent = deviceName || '—';
+  document.getElementById('deviceId').textContent = deviceId || '';
+  document.getElementById('polling').textContent = polling ? 'Active' : 'Idle';
+
+  // Profile / chat link
+  const profileEl = document.getElementById('profile');
+  let email = '';
+  try {
+    const info = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
+    email = (info && info.email) ? info.email : '';
+  } catch (e) { /* ignore */ }
+  profileEl.textContent = email || (chatId ? 'Chat linked (' + chatId + ')' : 'Not linked');
+
+  // Warning banner
+  const warn = document.getElementById('warnBox');
+  if (staleSW) {
+    warn.classList.remove('hidden');
+    warn.textContent = '⚠ Service worker masih v' + swVersion + '. Reload extension di chrome://extensions (tombol ⟳) biar sinkron.';
+  } else if (!swAlive) {
+    warn.classList.remove('hidden');
+    warn.textContent = 'ℹ Service worker tidur (normal). Data dibaca langsung dari storage.';
+  } else {
+    warn.classList.add('hidden');
+    warn.textContent = '';
+  }
 
   const btn = document.getElementById('btnToggle');
-  if (!state.configured) {
+  btn.disabled = false;
+
+  if (!configured) {
     setStatus('red', 'Not configured');
     btn.textContent = '⚙️ Open Settings';
     btn.dataset.mode = 'settings';
-  } else if (!state.chatId) {
+  } else if (!chatId) {
     setStatus('yellow', 'Chat belum ke-link');
     btn.textContent = 'Start';
     btn.dataset.mode = 'start';
-  } else if (state.polling) {
-    const ago = state.lastPollOk ? Math.round((Date.now() - state.lastPollOk) / 1000) : null;
-    if (state.lastPollError) {
+  } else if (polling) {
+    if (s.lastPollError) {
       setStatus('yellow', 'Polling error — retrying');
     } else {
-      setStatus('green', ago === null || ago < 90 ? 'Connected' : `Connected (${ago}s lalu)`);
+      const ago = s.lastPollOk ? Math.round((Date.now() - s.lastPollOk) / 1000) : null;
+      setStatus('green', (ago === null || ago < 90) ? 'Connected' : 'Connected (' + ago + 's lalu)');
     }
     btn.textContent = 'Stop';
     btn.dataset.mode = 'stop';
@@ -78,20 +114,21 @@ async function refresh(checkUpdate = false) {
     btn.dataset.mode = 'start';
   }
 
-  // error detail
+  // Error detail
   const errEl = document.getElementById('errBox');
-  if (state.lastPollError) {
+  if (s.lastPollError) {
     errEl.classList.remove('hidden');
-    errEl.textContent = '⚠ ' + state.lastPollError;
+    errEl.textContent = '⚠ ' + s.lastPollError;
   } else {
     errEl.classList.add('hidden');
+    errEl.textContent = '';
   }
 
-  // update button
+  // Update button
   const upBtn = document.getElementById('btnUpdate');
-  if (state.updateAvailable && state.updateVersion) {
+  if (s.updateAvailable && s.updateVersion) {
     upBtn.classList.remove('hidden');
-    upBtn.textContent = `⬆ Update v${state.updateVersion} tersedia`;
+    upBtn.textContent = '⬆ Update v' + s.updateVersion + ' tersedia';
   } else {
     upBtn.classList.add('hidden');
   }
@@ -100,17 +137,10 @@ async function refresh(checkUpdate = false) {
 
   if (checkUpdate) {
     const verEl = document.getElementById('version');
-    const prev = verEl.textContent;
     verEl.textContent = 'cek…';
-    try {
-      await send({ type: 'check-update' });
-    } catch (e) { /* ignore */ }
-    verEl.textContent = prev;
+    try { await chrome.runtime.sendMessage({ type: 'check-update' }); } catch (e) { /* ignore */ }
+    setTimeout(() => { verEl.textContent = 'v' + EXPECTED_VERSION; }, 800);
   }
-}
-
-function send(msg) {
-  return chrome.runtime.sendMessage(msg);
 }
 
 async function togglePolling() {
@@ -123,32 +153,28 @@ async function togglePolling() {
   }
 
   busy = true;
-  const label = btn.textContent;
   btn.disabled = true;
   btn.textContent = mode === 'start' ? 'Starting…' : 'Stopping…';
 
   try {
-    const res = mode === 'start'
-      ? await send({ type: 'start-polling' })
-      : await send({ type: 'stop-polling' });
-
+    const res = await chrome.runtime.sendMessage(
+      mode === 'start' ? { type: 'start-polling' } : { type: 'stop-polling' }
+    );
     if (res && res.success === false) {
       setStatus('red', res.error || 'Gagal');
       showError(res.error || 'Gagal memulai polling');
     }
   } catch (e) {
-    // service worker went away — restart it and retry once
+    // SW mungkin baru dibangunkan — coba sekali lagi
     try {
-      const res2 = mode === 'start'
-        ? await send({ type: 'start-polling' })
-        : await send({ type: 'stop-polling' });
+      const res2 = await chrome.runtime.sendMessage(
+        mode === 'start' ? { type: 'start-polling' } : { type: 'stop-polling' }
+      );
       if (res2 && res2.success === false) showError(res2.error);
     } catch (e2) {
-      showError('Chrome memutus koneksi ke service worker: ' + e2.message);
+      showError('Service worker nggak merespons. Reload extension di chrome://extensions.');
     }
   } finally {
-    btn.disabled = false;
-    btn.textContent = label;
     busy = false;
     await refresh();
   }
@@ -178,9 +204,7 @@ async function doUpdate() {
   setTimeout(refresh, 2500);
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────
-
 function setStatus(color, text) {
   document.getElementById('status').innerHTML =
-    `<span class="dot ${color}"></span>${text}`;
+    '<span class="dot ' + color + '"></span>' + text;
 }

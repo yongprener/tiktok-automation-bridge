@@ -157,8 +157,17 @@ function sendMessage(msg, timeoutMs = 3000) {
   let r = await sendMessage({ type: 'status-check' });
   t('returns object', !!r);
   t('configured=true', r && r.configured === true, JSON.stringify(r));
-  t('version=0.2.0', r && r.version === '0.2.0', r && r.version);
+  t('version=0.2.1', r && r.version === '0.2.1', r && r.version);
   t('chatId preserved', r && r.chatId === '7750244035', r && r.chatId);
+
+  console.log('\n1b) status-check reads FRESH storage (not stale in-memory values)');
+  store.deviceName = 'renamed-device';
+  store.chatId = '12345';
+  r = await sendMessage({ type: 'status-check' });
+  t('reflects new deviceName', r && r.deviceName === 'renamed-device', r && r.deviceName);
+  t('reflects new chatId', r && r.chatId === '12345', r && r.chatId);
+  store.deviceName = 'test-device';
+  store.chatId = '7750244035';
 
   console.log('\n2) start-polling responds (was: silent hang)');
   r = await sendMessage({ type: 'start-polling' });
